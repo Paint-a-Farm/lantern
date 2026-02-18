@@ -6,3 +6,4 @@ edition = "2021"
 [dependencies]
 lantern-hir = { path = "../hir" }
 petgraph = { workspace = true }
+rustc-hash = { workspace = true }

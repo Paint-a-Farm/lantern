@@ -1,6 +1,6 @@
 use std::fs;
 
-use lantern_hir::timing::{self, FileTimings, FuncTimings, PipelineReport, PHASE_EMIT, PHASE_EXPRS, PHASE_LIFT, PHASE_VARS};
+use lantern_hir::timing::{self, FileTimings, FuncTimings, PipelineReport, PHASE_EMIT, PHASE_EXPRS, PHASE_LIFT, PHASE_STRUCTURE, PHASE_VARS};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -78,6 +78,12 @@ fn main() {
                     lantern_exprs::eliminate_temporaries(&mut hir);
                 });
                 func_timings.record(PHASE_EXPRS, exprs_duration);
+
+                // CFG structuring: collapse flat blocks into nested control flow
+                let ((), structure_duration) = timing::timed(|| {
+                    lantern_structure::structure_function(&mut hir);
+                });
+                func_timings.record(PHASE_STRUCTURE, structure_duration);
             }
 
             if verbose {

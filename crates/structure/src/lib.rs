@@ -1,1 +1,3 @@
-// Structure: CFG -> structured control flow
+mod structurer;
+
+pub use structurer::structure_function;

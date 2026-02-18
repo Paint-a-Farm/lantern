@@ -1,0 +1,470 @@
+use petgraph::stable_graph::NodeIndex;
+use petgraph::visit::EdgeRef;
+use rustc_hash::FxHashSet;
+
+use lantern_hir::arena::ExprId;
+use lantern_hir::cfg::{EdgeKind, Terminator};
+use lantern_hir::expr::HirExpr;
+use lantern_hir::func::HirFunc;
+use lantern_hir::stmt::{ElseIfClause, HirStmt};
+use lantern_hir::types::UnOp;
+
+/// Structure a function's CFG into nested HirStmt trees.
+///
+/// After this pass, `func.cfg[func.entry].stmts` contains the complete
+/// structured output and `func.structured` is set to true. The emitter
+/// walks only the entry block's stmts recursively.
+pub fn structure_function(func: &mut HirFunc) {
+    let entry = func.entry;
+    let stmts = structure_region(func, entry, None, None, &mut FxHashSet::default());
+    func.cfg[entry].stmts = stmts;
+    func.cfg[entry].terminator = Terminator::None;
+    func.structured = true;
+}
+
+/// Context for the enclosing loop, used to emit break/continue.
+struct LoopCtx {
+    header: NodeIndex,
+    exit: Option<NodeIndex>,
+}
+
+/// Structure a region of the CFG starting from `start`, stopping before `stop`.
+/// Returns the structured statement list.
+///
+/// `loop_ctx` provides the enclosing loop's header and exit for break/continue.
+fn structure_region(
+    func: &mut HirFunc,
+    start: NodeIndex,
+    stop: Option<NodeIndex>,
+    loop_ctx: Option<&LoopCtx>,
+    visited: &mut FxHashSet<NodeIndex>,
+) -> Vec<HirStmt> {
+    let mut result = Vec::new();
+    let mut current = Some(start);
+
+    while let Some(node) = current {
+        if Some(node) == stop {
+            break;
+        }
+        if !visited.insert(node) {
+            break;
+        }
+
+        // Check if this is a while-loop header
+        if let Some(loop_result) = try_structure_while(func, node, stop, loop_ctx, visited) {
+            result.extend(loop_result.stmts);
+            current = loop_result.next;
+            continue;
+        }
+
+        // Take statements from this block
+        let block_stmts = std::mem::take(&mut func.cfg[node].stmts);
+        let terminator = func.cfg[node].terminator.clone();
+        result.extend(block_stmts);
+
+        match &terminator {
+            Terminator::None => {
+                current = None;
+            }
+
+            Terminator::Return(values) => {
+                result.push(HirStmt::Return(values.clone()));
+                current = None;
+            }
+
+            Terminator::Jump => {
+                let succ = single_successor(&func.cfg, node);
+
+                // Check for break/continue in loop context
+                if let (Some(succ_node), Some(lctx)) = (succ, loop_ctx) {
+                    if succ_node == lctx.header {
+                        result.push(HirStmt::Continue);
+                        current = None;
+                        continue;
+                    }
+                    if Some(succ_node) == lctx.exit {
+                        result.push(HirStmt::Break);
+                        current = None;
+                        continue;
+                    }
+                }
+
+                current = succ;
+            }
+
+            Terminator::Branch { condition } => {
+                let condition = *condition;
+                current = structure_branch(func, node, condition, stop, loop_ctx, visited, &mut result);
+            }
+
+            Terminator::ForNumLoop { .. } | Terminator::ForGenLoop { .. } => {
+                current = None;
+            }
+        }
+    }
+
+    result
+}
+
+/// Structure a branch (if/else) and return the next node to continue from.
+fn structure_branch(
+    func: &mut HirFunc,
+    _node: NodeIndex,
+    condition: ExprId,
+    stop: Option<NodeIndex>,
+    loop_ctx: Option<&LoopCtx>,
+    visited: &mut FxHashSet<NodeIndex>,
+    result: &mut Vec<HirStmt>,
+) -> Option<NodeIndex> {
+    let (then_node, else_node) = branch_successors(&func.cfg, _node);
+
+    match (then_node, else_node) {
+        (Some(then_n), Some(else_n)) => {
+            // Check for break/continue as branch targets
+            if let Some(lctx) = loop_ctx {
+                // if cond then break end
+                if Some(then_n) == lctx.exit && !visited.contains(&then_n) {
+                    result.push(HirStmt::If {
+                        condition,
+                        then_body: vec![HirStmt::Break],
+                        elseif_clauses: Vec::new(),
+                        else_body: None,
+                    });
+                    return Some(else_n);
+                }
+                // if cond then continue end
+                if then_n == lctx.header {
+                    result.push(HirStmt::If {
+                        condition,
+                        then_body: vec![HirStmt::Continue],
+                        elseif_clauses: Vec::new(),
+                        else_body: None,
+                    });
+                    return Some(else_n);
+                }
+                // if not cond then break end (else branch breaks)
+                if Some(else_n) == lctx.exit && !visited.contains(&else_n) {
+                    let inv_cond = negate_condition(func, condition);
+                    result.push(HirStmt::If {
+                        condition: inv_cond,
+                        then_body: vec![HirStmt::Break],
+                        elseif_clauses: Vec::new(),
+                        else_body: None,
+                    });
+                    return Some(then_n);
+                }
+            }
+
+            // Find the join point (where both branches converge)
+            let join = find_join_point(func, then_n, else_n, stop);
+
+            // Fix for asymmetric returns: if join is None, check if one
+            // branch always returns and the other continues.
+            let effective_join = join.or_else(|| {
+                let then_returns = branch_always_returns(func, then_n, stop);
+                let else_returns = branch_always_returns(func, else_n, stop);
+                if then_returns && !else_returns {
+                    Some(else_n)
+                } else if else_returns && !then_returns {
+                    Some(then_n)
+                } else {
+                    None
+                }
+            });
+
+            let branch_stop = effective_join.or(stop);
+            let then_stmts = structure_region(func, then_n, branch_stop, loop_ctx, visited);
+            let else_stmts = structure_region(func, else_n, branch_stop, loop_ctx, visited);
+
+            let (elseif_clauses, final_else) = extract_elseif_chain(else_stmts);
+
+            if elseif_clauses.is_empty() && final_else.is_empty() {
+                result.push(HirStmt::If {
+                    condition,
+                    then_body: then_stmts,
+                    elseif_clauses: Vec::new(),
+                    else_body: None,
+                });
+            } else if elseif_clauses.is_empty() && !final_else.is_empty() {
+                if then_stmts.is_empty() {
+                    let inv_cond = negate_condition(func, condition);
+                    result.push(HirStmt::If {
+                        condition: inv_cond,
+                        then_body: final_else,
+                        elseif_clauses: Vec::new(),
+                        else_body: None,
+                    });
+                } else {
+                    result.push(HirStmt::If {
+                        condition,
+                        then_body: then_stmts,
+                        elseif_clauses: Vec::new(),
+                        else_body: Some(final_else),
+                    });
+                }
+            } else {
+                result.push(HirStmt::If {
+                    condition,
+                    then_body: then_stmts,
+                    elseif_clauses,
+                    else_body: if final_else.is_empty() {
+                        None
+                    } else {
+                        Some(final_else)
+                    },
+                });
+            }
+
+            effective_join
+        }
+        (Some(then_n), None) => {
+            let then_stmts = structure_region(func, then_n, stop, loop_ctx, visited);
+            result.push(HirStmt::If {
+                condition,
+                then_body: then_stmts,
+                elseif_clauses: Vec::new(),
+                else_body: None,
+            });
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Result of structuring a loop.
+struct LoopResult {
+    stmts: Vec<HirStmt>,
+    next: Option<NodeIndex>,
+}
+
+/// Try to structure `node` as a while-loop header.
+///
+/// A while-loop is detected when a Branch node's body has a path back
+/// to the header node (back-edge).
+fn try_structure_while(
+    func: &mut HirFunc,
+    node: NodeIndex,
+    _stop: Option<NodeIndex>,
+    _outer_loop: Option<&LoopCtx>,
+    visited: &mut FxHashSet<NodeIndex>,
+) -> Option<LoopResult> {
+    let condition = match &func.cfg[node].terminator {
+        Terminator::Branch { condition } => *condition,
+        _ => return None,
+    };
+
+    // Use branch_successors for deterministic then/else classification
+    let (then_node, else_node) = branch_successors(&func.cfg, node);
+    let (body_start, exit_node) = match (then_node, else_node) {
+        (Some(t), Some(e)) => (t, e),
+        _ => return None,
+    };
+
+    // Check if the body has a path back to this node
+    if !has_back_edge_to(&func.cfg, body_start, node) {
+        return None;
+    }
+
+    // This is a while loop
+    let header_stmts = std::mem::take(&mut func.cfg[node].stmts);
+
+    let loop_ctx = LoopCtx {
+        header: node,
+        exit: Some(exit_node),
+    };
+
+    let body_stmts = structure_region(func, body_start, Some(node), Some(&loop_ctx), visited);
+
+    let mut all_stmts = Vec::new();
+    all_stmts.extend(header_stmts);
+    all_stmts.push(HirStmt::While {
+        condition,
+        body: body_stmts,
+    });
+
+    Some(LoopResult {
+        stmts: all_stmts,
+        next: Some(exit_node),
+    })
+}
+
+/// Check if any node reachable from `start` has a direct edge to `header`.
+fn has_back_edge_to(
+    cfg: &lantern_hir::cfg::CfgGraph,
+    start: NodeIndex,
+    header: NodeIndex,
+) -> bool {
+    let mut visited = FxHashSet::default();
+    let mut stack = vec![start];
+    while let Some(node) = stack.pop() {
+        if node == header || !visited.insert(node) {
+            continue;
+        }
+        for e in cfg.edges(node) {
+            if e.target() == header {
+                return true;
+            }
+            stack.push(e.target());
+        }
+    }
+    false
+}
+
+/// Check if a branch always ends in Return (no path reaches a continuation).
+fn branch_always_returns(
+    func: &HirFunc,
+    start: NodeIndex,
+    stop: Option<NodeIndex>,
+) -> bool {
+    let mut stack = vec![start];
+    let mut visited = FxHashSet::default();
+    while let Some(node) = stack.pop() {
+        if Some(node) == stop {
+            // Reached the join point — this path does NOT return
+            return false;
+        }
+        if !visited.insert(node) {
+            continue;
+        }
+        match &func.cfg[node].terminator {
+            Terminator::Return(_) => {
+                // This path returns — keep checking other paths
+            }
+            Terminator::None => {
+                // Dead end without return
+                return false;
+            }
+            _ => {
+                let mut pushed = false;
+                for e in func.cfg.edges(node) {
+                    if e.weight().kind != EdgeKind::LoopBack {
+                        stack.push(e.target());
+                        pushed = true;
+                    }
+                }
+                if !pushed {
+                    // All exits are back-edges — infinite loop, not a return
+                    return false;
+                }
+            }
+        }
+    }
+    !visited.is_empty()
+}
+
+// ---- CFG helpers ----
+
+fn single_successor(
+    cfg: &lantern_hir::cfg::CfgGraph,
+    node: NodeIndex,
+) -> Option<NodeIndex> {
+    cfg.edges(node).next().map(|e| e.target())
+}
+
+fn branch_successors(
+    cfg: &lantern_hir::cfg::CfgGraph,
+    node: NodeIndex,
+) -> (Option<NodeIndex>, Option<NodeIndex>) {
+    let mut then_node = None;
+    let mut else_node = None;
+    for e in cfg.edges(node) {
+        match e.weight().kind {
+            EdgeKind::Then | EdgeKind::LoopBack => then_node = Some(e.target()),
+            EdgeKind::Else | EdgeKind::LoopExit => else_node = Some(e.target()),
+            EdgeKind::Unconditional => {
+                if then_node.is_none() {
+                    then_node = Some(e.target());
+                } else {
+                    else_node = Some(e.target());
+                }
+            }
+        }
+    }
+    (then_node, else_node)
+}
+
+fn find_join_point(
+    func: &HirFunc,
+    then_node: NodeIndex,
+    else_node: NodeIndex,
+    outer_stop: Option<NodeIndex>,
+) -> Option<NodeIndex> {
+    let then_reachable = collect_reachable(&func.cfg, then_node, outer_stop);
+    let else_reachable = collect_reachable(&func.cfg, else_node, outer_stop);
+
+    let mut common: Vec<NodeIndex> = then_reachable
+        .intersection(&else_reachable)
+        .copied()
+        .collect();
+
+    if then_reachable.contains(&else_node) {
+        common.push(else_node);
+    }
+    if else_reachable.contains(&then_node) {
+        common.push(then_node);
+    }
+
+    if common.is_empty() {
+        return None;
+    }
+
+    common.sort_by_key(|n| func.cfg[*n].pc_range.0);
+    common.dedup();
+    Some(common[0])
+}
+
+fn collect_reachable(
+    cfg: &lantern_hir::cfg::CfgGraph,
+    start: NodeIndex,
+    stop: Option<NodeIndex>,
+) -> FxHashSet<NodeIndex> {
+    let mut visited = FxHashSet::default();
+    let mut stack = vec![start];
+    while let Some(node) = stack.pop() {
+        if Some(node) == stop || !visited.insert(node) {
+            continue;
+        }
+        for e in cfg.edges(node) {
+            if e.weight().kind != EdgeKind::LoopBack {
+                stack.push(e.target());
+            }
+        }
+    }
+    visited
+}
+
+fn extract_elseif_chain(
+    mut else_stmts: Vec<HirStmt>,
+) -> (Vec<ElseIfClause>, Vec<HirStmt>) {
+    if else_stmts.len() == 1 {
+        if matches!(&else_stmts[0], HirStmt::If { .. }) {
+            let stmt = else_stmts.remove(0);
+            if let HirStmt::If {
+                condition,
+                then_body,
+                elseif_clauses,
+                else_body,
+            } = stmt
+            {
+                let mut clauses = vec![ElseIfClause {
+                    condition,
+                    body: then_body,
+                }];
+                clauses.extend(elseif_clauses);
+                let final_else = else_body.unwrap_or_default();
+                return (clauses, final_else);
+            }
+        }
+    }
+    (Vec::new(), else_stmts)
+}
+
+fn negate_condition(func: &mut HirFunc, condition: ExprId) -> ExprId {
+    if let HirExpr::Unary { op: UnOp::Not, operand } = func.exprs.get(condition) {
+        return *operand;
+    }
+    func.exprs.alloc(HirExpr::Unary {
+        op: UnOp::Not,
+        operand: condition,
+    })
+}

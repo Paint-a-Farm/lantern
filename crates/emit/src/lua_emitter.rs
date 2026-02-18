@@ -39,6 +39,18 @@ impl<'a> LuaEmitter<'a> {
     }
 
     pub fn emit(&mut self) {
+        if self.func.structured {
+            // Structured mode: walk only the entry block's nested statement tree
+            let entry = self.func.entry;
+            for stmt in &self.func.cfg[entry].stmts {
+                self.emit_stmt(stmt);
+            }
+        } else {
+            self.emit_unstructured();
+        }
+    }
+
+    fn emit_unstructured(&mut self) {
         // Collect blocks sorted by PC start
         let mut blocks: Vec<_> = self
             .func

@@ -44,6 +44,11 @@ pub struct HirFunc {
 
     /// Function name (from debug info, if available).
     pub name: Option<String>,
+
+    /// Whether the CFG has been structured into nested HirStmt trees.
+    /// When true, the emitter should only walk `cfg[entry].stmts` recursively
+    /// instead of iterating all blocks.
+    pub structured: bool,
 }
 
 impl HirFunc {
@@ -63,6 +68,7 @@ impl HirFunc {
             origins: FxHashMap::default(),
             upvalue_names: Vec::new(),
             name: None,
+            structured: false,
         }
     }
 
