@@ -5,3 +5,4 @@ pub mod var;
 pub mod arena;
 pub mod func;
 pub mod cfg;
+pub mod timing;

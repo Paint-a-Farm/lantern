@@ -1,5 +1,6 @@
 use std::fs;
-use std::time::Instant;
+
+use lantern_hir::timing::{self, FileTimings, FuncTimings, PipelineReport, PHASE_LIFT};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -8,11 +9,8 @@ fn main() {
         std::process::exit(1);
     }
 
-    let total_start = Instant::now();
-    let mut total_functions = 0usize;
-    let mut total_blocks = 0usize;
-    let mut total_exprs = 0usize;
-    let mut file_count = 0usize;
+    let verbose = args.len() == 1;
+    let mut report = PipelineReport::new();
 
     for path in &args {
         let data = match fs::read(path) {
@@ -23,74 +21,62 @@ fn main() {
             }
         };
 
-        let parse_start = Instant::now();
-        let chunk = match lantern_bytecode::deserialize(&data, 1) {
+        let (chunk, parse_duration) = timing::timed(|| lantern_bytecode::deserialize(&data, 1));
+        let chunk = match chunk {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("Parse error {}: {}", path, e);
                 continue;
             }
         };
-        let parse_elapsed = parse_start.elapsed();
 
-        let lift_start = Instant::now();
-        let mut func_count = 0;
-        let mut blocks = 0;
-        let mut exprs = 0;
+        let mut file_timings = FileTimings::new(path.as_str());
+        file_timings.parse_time = parse_duration;
 
         for i in 0..chunk.functions.len() {
-            let hir = lantern_lift::lift_function(&chunk, i);
-            blocks += hir.cfg.node_count();
-            exprs += hir.exprs.len();
-            func_count += 1;
-        }
-        let lift_elapsed = lift_start.elapsed();
+            let func_name = chunk
+                .get_string(chunk.functions[i].debug.func_name_index)
+                .unwrap_or_else(|| format!("fn#{}", i));
 
-        if args.len() == 1 {
-            // Detailed per-function output for single file
-            println!("Parsed: {} ({:.2?})", path, parse_elapsed);
-            println!("  strings: {}", chunk.string_table.len());
-            println!("  functions: {}", chunk.functions.len());
+            let mut func_timings = FuncTimings::new(&func_name);
 
-            for (i, func) in chunk.functions.iter().enumerate() {
-                let name = chunk.get_string(func.debug.func_name_index);
-                let hir = lantern_lift::lift_function(&chunk, i);
-                let stmt_count: usize = hir.cfg.node_weights()
+            let (hir, lift_duration) = timing::timed(|| lantern_lift::lift_function(&chunk, i));
+            func_timings.record(PHASE_LIFT, lift_duration);
+
+            if verbose {
+                let stmt_count: usize = hir
+                    .cfg
+                    .node_weights()
                     .map(|b| b.stmts.len())
                     .sum();
-
                 println!(
-                    "  fn #{}: {} — {} blocks, {} edges, {} exprs, {} stmts",
+                    "  fn #{}: {} — {} blocks, {} edges, {} exprs, {} stmts ({:.2?})",
                     i,
-                    name.as_deref().unwrap_or("<anonymous>"),
+                    func_name,
                     hir.cfg.node_count(),
                     hir.cfg.edge_count(),
                     hir.exprs.len(),
                     stmt_count,
+                    lift_duration,
                 );
             }
-            println!("  lift: {:.2?}", lift_elapsed);
-        } else {
-            // Summary for batch mode
-            let short_name = path.rsplit('/').next().unwrap_or(path);
+
+            file_timings.functions.push(func_timings);
+        }
+
+        if verbose {
             println!(
-                "{}: {} funcs, {} blocks, {} exprs (parse {:.2?}, lift {:.2?})",
-                short_name, func_count, blocks, exprs, parse_elapsed, lift_elapsed,
+                "Parsed: {} ({:.2?})",
+                path, parse_duration,
             );
         }
 
-        total_functions += func_count;
-        total_blocks += blocks;
-        total_exprs += exprs;
-        file_count += 1;
+        report.add(file_timings);
     }
 
-    if file_count > 1 {
-        let total_elapsed = total_start.elapsed();
-        println!("\n--- Totals ---");
-        println!(
-            "{} files, {} functions, {} blocks, {} exprs in {:.2?}",
-            file_count, total_functions, total_blocks, total_exprs, total_elapsed,
-        );
+    report.print_summary();
+
+    if report.total_functions() > 10 {
+        report.print_slowest(15);
     }
 }
