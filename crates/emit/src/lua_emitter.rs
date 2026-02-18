@@ -404,9 +404,13 @@ impl<'a> LuaEmitter<'a> {
                 self.output.push('\n');
             }
 
-            Terminator::ForNumLoop { .. } | Terminator::ForGenLoop { .. } => {
+            Terminator::ForNumPrep { .. }
+            | Terminator::ForNumBack { .. }
+            | Terminator::ForGenBack { .. } => {
+                // For-loop terminators are handled by the structurer.
+                // If we reach here, the function wasn't structured.
                 self.write_indent();
-                self.output.push_str("-- for loop back-edge\n");
+                self.output.push_str("-- for loop (unstructured)\n");
             }
         }
     }

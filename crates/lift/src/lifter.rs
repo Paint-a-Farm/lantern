@@ -1,4 +1,5 @@
 use petgraph::stable_graph::NodeIndex;
+use petgraph::Direction;
 use rustc_hash::FxHashMap;
 
 use lantern_bytecode::chunk::Chunk;
@@ -116,6 +117,8 @@ impl<'a> Lifter<'a> {
                     next_node,
                     HirEdge::unconditional(),
                 );
+                self.hir.cfg[self.current_block].terminator =
+                    lantern_hir::cfg::Terminator::Jump;
             }
         }
     }
@@ -597,24 +600,85 @@ impl<'a> Lifter<'a> {
                 2 // AUX
             }
 
-            // For loops
+            // Numeric for-loop
             OpCode::ForNPrep => {
-                // Numeric for prep: registers are [limit, step, index, variable]
-                // Jump to FORNLOOP if loop should execute, or skip
-                let target = ((pc + 1) as i64 + insn.d as i64) as usize;
-                // For now, just emit the jump edges. The patterns crate will
-                // recognize the FORNPREP/FORNLOOP pair.
-                self.add_conditional_edges(pc + 1, target);
+                // Register layout: A+0=limit, A+1=step, A+2=index(start), A+3=var
+                let base = insn.a;
+                let limit = self.alloc_expr(HirExpr::Reg(self.reg_ref(base, pc)), pc);
+                let step = self.alloc_expr(HirExpr::Reg(self.reg_ref(base + 1, pc)), pc);
+                let start = self.alloc_expr(HirExpr::Reg(self.reg_ref(base + 2, pc)), pc);
+
+                // TODO: elide step when it's trivially 1 (store None)
+                let body_pc = pc + 1;
+                let exit_pc = ((pc + 1) as i64 + insn.d as i64) as usize;
+
+                self.hir.cfg[self.current_block].terminator =
+                    lantern_hir::cfg::Terminator::ForNumPrep {
+                        base_reg: base,
+                        start,
+                        limit,
+                        step: Some(step),
+                    };
+
+                // Body edge (LoopBack) and exit edge (LoopExit)
+                if let Some(&body_node) = self.block_map.get(&body_pc) {
+                    self.hir.cfg.add_edge(
+                        self.current_block,
+                        body_node,
+                        HirEdge { kind: EdgeKind::LoopBack, args: Vec::new() },
+                    );
+                }
+                if let Some(&exit_node) = self.block_map.get(&exit_pc) {
+                    self.hir.cfg.add_edge(
+                        self.current_block,
+                        exit_node,
+                        HirEdge { kind: EdgeKind::LoopExit, args: Vec::new() },
+                    );
+                }
                 1
             }
 
             OpCode::ForNLoop => {
-                let target = ((pc + 1) as i64 + insn.d as i64) as usize;
-                self.add_conditional_edges(target, pc + 1);
+                let body_pc = ((pc + 1) as i64 + insn.d as i64) as usize;
+                let exit_pc = pc + 1;
+
+                self.hir.cfg[self.current_block].terminator =
+                    lantern_hir::cfg::Terminator::ForNumBack {
+                        base_reg: insn.a,
+                    };
+
+                if let Some(&body_node) = self.block_map.get(&body_pc) {
+                    self.hir.cfg.add_edge(
+                        self.current_block,
+                        body_node,
+                        HirEdge { kind: EdgeKind::LoopBack, args: Vec::new() },
+                    );
+                }
+                if let Some(&exit_node) = self.block_map.get(&exit_pc) {
+                    self.hir.cfg.add_edge(
+                        self.current_block,
+                        exit_node,
+                        HirEdge { kind: EdgeKind::LoopExit, args: Vec::new() },
+                    );
+                }
                 1
             }
 
+            // Generic for-loop
             OpCode::ForGPrep | OpCode::ForGPrepINext | OpCode::ForGPrepNext => {
+                // FORGPREP sets up iteration state then jumps to FORGLOOP.
+                // The iterator expressions are already in registers A+0/A+1/A+2
+                // from preceding instructions. We just record them and jump.
+                let base = insn.a;
+                let iterators = vec![
+                    self.alloc_expr(HirExpr::Reg(self.reg_ref(base, pc)), pc),
+                    self.alloc_expr(HirExpr::Reg(self.reg_ref(base + 1, pc)), pc),
+                    self.alloc_expr(HirExpr::Reg(self.reg_ref(base + 2, pc)), pc),
+                ];
+
+                // Store iterators in the block for the structurer to pick up
+                self.hir.cfg[self.current_block].for_gen_iterators = Some(iterators);
+
                 let target = ((pc + 1) as i64 + insn.d as i64) as usize;
                 self.add_jump_edge(target);
                 self.hir.cfg[self.current_block].terminator =
@@ -623,10 +687,36 @@ impl<'a> Lifter<'a> {
             }
 
             OpCode::ForGLoop => {
-                let target = ((pc + 1) as i64 + insn.d as i64) as usize;
-                // Back-edge to loop body, exit to after loop
-                // AUX has var count in low 8 bits
-                self.add_conditional_edges(target, pc + 1);
+                let base = insn.a;
+                let var_count = (insn.aux & 0xFF) as u8;
+                let body_pc = ((pc + 1) as i64 + insn.d as i64) as usize;
+                let exit_pc = pc + 2; // skip AUX word
+
+                // Look for iterator info from the FORGPREP block that jumps to us.
+                // The FORGPREP block stored iterators before jumping here.
+                let iterators = self.find_forgen_iterators();
+
+                self.hir.cfg[self.current_block].terminator =
+                    lantern_hir::cfg::Terminator::ForGenBack {
+                        base_reg: base,
+                        var_count,
+                        iterators,
+                    };
+
+                if let Some(&body_node) = self.block_map.get(&body_pc) {
+                    self.hir.cfg.add_edge(
+                        self.current_block,
+                        body_node,
+                        HirEdge { kind: EdgeKind::LoopBack, args: Vec::new() },
+                    );
+                }
+                if let Some(&exit_node) = self.block_map.get(&exit_pc) {
+                    self.hir.cfg.add_edge(
+                        self.current_block,
+                        exit_node,
+                        HirEdge { kind: EdgeKind::LoopExit, args: Vec::new() },
+                    );
+                }
                 2 // AUX
             }
 
@@ -739,6 +829,18 @@ impl<'a> Lifter<'a> {
             target: reg,
             value,
         });
+    }
+
+    /// Find iterator expressions from a predecessor FORGPREP block.
+    /// FORGPREP stores its iterators in the block, then jumps to FORGLOOP.
+    /// Assumes exactly one FORGPREP predecessor per FORGLOOP (Luau compiler invariant).
+    fn find_forgen_iterators(&self) -> Vec<ExprId> {
+        for pred in self.hir.cfg.neighbors_directed(self.current_block, Direction::Incoming) {
+            if let Some(iters) = &self.hir.cfg[pred].for_gen_iterators {
+                return iters.clone();
+            }
+        }
+        Vec::new()
     }
 
     fn lift_constant(&mut self, index: usize, pc: usize) -> ExprId {
@@ -877,25 +979,4 @@ impl<'a> Lifter<'a> {
         }
     }
 
-    fn add_conditional_edges(&mut self, then_pc: usize, else_pc: usize) {
-        // Placeholder condition — will be resolved by pattern matching
-        let cond = self.alloc_expr(HirExpr::Literal(LuaValue::Boolean(true)), 0);
-        self.hir.cfg[self.current_block].terminator =
-            lantern_hir::cfg::Terminator::Branch { condition: cond };
-
-        if let Some(&then_node) = self.block_map.get(&then_pc) {
-            self.hir.cfg.add_edge(
-                self.current_block,
-                then_node,
-                HirEdge { kind: EdgeKind::LoopBack, args: Vec::new() },
-            );
-        }
-        if let Some(&else_node) = self.block_map.get(&else_pc) {
-            self.hir.cfg.add_edge(
-                self.current_block,
-                else_node,
-                HirEdge { kind: EdgeKind::LoopExit, args: Vec::new() },
-            );
-        }
-    }
 }

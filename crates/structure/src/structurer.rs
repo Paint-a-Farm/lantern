@@ -97,8 +97,25 @@ fn structure_region(
                 current = structure_branch(func, node, condition, stop, loop_ctx, visited, &mut result);
             }
 
-            Terminator::ForNumLoop { .. } | Terminator::ForGenLoop { .. } => {
+            Terminator::ForNumPrep { base_reg, start, limit, step } => {
+                let start = *start;
+                let limit = *limit;
+                let step = *step;
+                let base_reg = *base_reg;
+                current = structure_for_num(func, node, base_reg, start, limit, step, stop, loop_ctx, visited, &mut result);
+            }
+
+            Terminator::ForNumBack { .. } => {
+                // Should not be reached during structuring — the ForNumPrep
+                // handler structures the body up to and including this block.
                 current = None;
+            }
+
+            Terminator::ForGenBack { base_reg, var_count, ref iterators } => {
+                let base_reg = *base_reg;
+                let var_count = *var_count;
+                let iterators = iterators.clone();
+                current = structure_for_gen(func, node, base_reg, var_count, iterators, stop, loop_ctx, visited, &mut result);
             }
         }
     }
@@ -255,15 +272,24 @@ fn try_structure_while(
 
     // Use branch_successors for deterministic then/else classification
     let (then_node, else_node) = branch_successors(&func.cfg, node);
-    let (body_start, exit_node) = match (then_node, else_node) {
+    let (then_n, else_n) = match (then_node, else_node) {
         (Some(t), Some(e)) => (t, e),
         _ => return None,
     };
 
-    // Check if the body has a path back to this node
-    if !has_back_edge_to(&func.cfg, body_start, node) {
-        return None;
-    }
+    // Check which branch has a back-edge to the header — that's the body.
+    // The other branch is the exit.
+    let (body_start, exit_node, loop_condition) =
+        if has_back_edge_to(&func.cfg, then_n, node) {
+            // Then-branch loops back: body=then, exit=else, condition as-is
+            (then_n, else_n, condition)
+        } else if has_back_edge_to(&func.cfg, else_n, node) {
+            // Else-branch loops back: body=else, exit=then, negate condition
+            let neg_cond = negate_condition(func, condition);
+            (else_n, then_n, neg_cond)
+        } else {
+            return None;
+        };
 
     // This is a while loop
     let header_stmts = std::mem::take(&mut func.cfg[node].stmts);
@@ -278,7 +304,7 @@ fn try_structure_while(
     let mut all_stmts = Vec::new();
     all_stmts.extend(header_stmts);
     all_stmts.push(HirStmt::While {
-        condition,
+        condition: loop_condition,
         body: body_stmts,
     });
 
@@ -457,6 +483,165 @@ fn extract_elseif_chain(
         }
     }
     (Vec::new(), else_stmts)
+}
+
+/// Structure a numeric for-loop from a ForNumPrep terminator.
+///
+/// CFG shape:
+///   [ForNumPrep] --LoopBack--> [body...] --> [ForNumBack] --LoopBack--> body
+///                --LoopExit--> [exit]        [ForNumBack] --LoopExit--> exit
+///
+/// The structurer produces HirStmt::NumericFor and returns the exit node.
+fn structure_for_num(
+    func: &mut HirFunc,
+    node: NodeIndex,
+    base_reg: u8,
+    start: ExprId,
+    limit: ExprId,
+    step: Option<ExprId>,
+    stop: Option<NodeIndex>,
+    _outer_loop: Option<&LoopCtx>,
+    visited: &mut FxHashSet<NodeIndex>,
+    result: &mut Vec<HirStmt>,
+) -> Option<NodeIndex> {
+    // Find body start (LoopBack) and exit (LoopExit) from the prep block
+    let mut body_start = None;
+    let mut exit_node = None;
+    for e in func.cfg.edges(node) {
+        match e.weight().kind {
+            EdgeKind::LoopBack => body_start = Some(e.target()),
+            EdgeKind::LoopExit => exit_node = Some(e.target()),
+            _ => {}
+        }
+    }
+
+    let body_start = match body_start {
+        Some(n) => n,
+        None => return exit_node.or(stop),
+    };
+
+    // Find the ForNumBack block — it's the block with a ForNumBack terminator
+    // reachable from the body. We structure the body stopping at the back-edge block.
+    let back_block = find_for_back_block(func, body_start, node);
+
+    // Look up the loop variable VarId: it's at register base_reg+3.
+    // The vars pass should have assigned a VarId to this register at the prep block's PC.
+    let prep_pc = func.cfg[node].pc_range.0;
+    let var = func.vars.lookup_reg(&lantern_hir::var::RegRef {
+        register: base_reg + 3,
+        pc: prep_pc,
+    }).unwrap_or(lantern_hir::var::VarId(0));
+
+    // Set up loop context for break/continue inside the body
+    let loop_ctx = LoopCtx {
+        header: back_block.unwrap_or(node),
+        exit: exit_node,
+    };
+
+    // Structure the body, stopping before the ForNumBack block
+    let body_stmts = structure_region(func, body_start, back_block, Some(&loop_ctx), visited);
+
+    // Mark the back-edge block as visited so it's not re-processed
+    if let Some(back) = back_block {
+        visited.insert(back);
+    }
+
+    result.push(HirStmt::NumericFor {
+        var,
+        start,
+        limit,
+        step,
+        body: body_stmts,
+    });
+
+    exit_node
+}
+
+/// Structure a generic for-loop from a ForGenBack terminator.
+///
+/// CFG shape:
+///   [FORGPREP/Jump] --unconditional--> [ForGenBack]
+///   [ForGenBack] --LoopBack--> [body...] --back to ForGenBack
+///   [ForGenBack] --LoopExit--> [exit]
+///
+/// The structurer produces HirStmt::GenericFor and returns the exit node.
+fn structure_for_gen(
+    func: &mut HirFunc,
+    node: NodeIndex,
+    base_reg: u8,
+    var_count: u8,
+    iterators: Vec<ExprId>,
+    _stop: Option<NodeIndex>,
+    _outer_loop: Option<&LoopCtx>,
+    visited: &mut FxHashSet<NodeIndex>,
+    result: &mut Vec<HirStmt>,
+) -> Option<NodeIndex> {
+    // Find body start (LoopBack) and exit (LoopExit) from the ForGenBack block
+    let mut body_start = None;
+    let mut exit_node = None;
+    for e in func.cfg.edges(node) {
+        match e.weight().kind {
+            EdgeKind::LoopBack => body_start = Some(e.target()),
+            EdgeKind::LoopExit => exit_node = Some(e.target()),
+            _ => {}
+        }
+    }
+
+    let body_start = match body_start {
+        Some(n) => n,
+        None => return exit_node,
+    };
+
+    // Look up loop variable VarIds: registers base_reg+3 .. base_reg+2+var_count
+    let block_pc = func.cfg[node].pc_range.0;
+    let vars: Vec<lantern_hir::var::VarId> = (0..var_count)
+        .map(|i| {
+            func.vars.lookup_reg(&lantern_hir::var::RegRef {
+                register: base_reg + 3 + i,
+                pc: block_pc,
+            }).unwrap_or(lantern_hir::var::VarId(0))
+        })
+        .collect();
+
+    // Set up loop context — the header is this ForGenBack node
+    let loop_ctx = LoopCtx {
+        header: node,
+        exit: exit_node,
+    };
+
+    // Structure the body, stopping before the ForGenBack node itself (back-edge)
+    let body_stmts = structure_region(func, body_start, Some(node), Some(&loop_ctx), visited);
+
+    result.push(HirStmt::GenericFor {
+        vars,
+        iterators,
+        body: body_stmts,
+    });
+
+    exit_node
+}
+
+/// Find the ForNumBack block reachable from `body_start`, avoiding `header`.
+/// This is the block whose terminator is ForNumBack.
+fn find_for_back_block(
+    func: &HirFunc,
+    body_start: NodeIndex,
+    header: NodeIndex,
+) -> Option<NodeIndex> {
+    let mut visited = FxHashSet::default();
+    let mut stack = vec![body_start];
+    while let Some(node) = stack.pop() {
+        if node == header || !visited.insert(node) {
+            continue;
+        }
+        if matches!(func.cfg[node].terminator, Terminator::ForNumBack { .. }) {
+            return Some(node);
+        }
+        for e in func.cfg.edges(node) {
+            stack.push(e.target());
+        }
+    }
+    None
 }
 
 fn negate_condition(func: &mut HirFunc, condition: ExprId) -> ExprId {

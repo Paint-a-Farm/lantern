@@ -14,6 +14,9 @@ pub struct HirBlock {
     pub terminator: Terminator,
     /// Bytecode PC range for this block [start, end).
     pub pc_range: (usize, usize),
+    /// Generic for-loop setup: iterator expressions from a FORGPREP block.
+    /// The structurer consumes these when building GenericFor statements.
+    pub for_gen_iterators: Option<Vec<ExprId>>,
 }
 
 impl HirBlock {
@@ -22,6 +25,7 @@ impl HirBlock {
             stmts: Vec::new(),
             terminator: Terminator::None,
             pc_range: (0, 0),
+            for_gen_iterators: None,
         }
     }
 }
@@ -39,13 +43,32 @@ pub enum Terminator {
     },
     /// Return from function.
     Return(Vec<ExprId>),
-    /// Numeric for loop back-edge (FORNLOOP).
-    ForNumLoop {
-        var: VarId,
+    /// Numeric for-loop setup (FORNPREP).
+    /// The block's stmts contain the limit/step/init assignments.
+    /// Edges: LoopBack → body start, LoopExit → after loop.
+    ForNumPrep {
+        /// Base register (A). Layout: A+0=limit, A+1=step, A+2=index, A+3=var.
+        base_reg: u8,
+        /// Expressions for start, limit, step that were loaded before FORNPREP.
+        start: ExprId,
+        limit: ExprId,
+        step: Option<ExprId>,
     },
-    /// Generic for loop back-edge (FORGLOOP).
-    ForGenLoop {
-        vars: Vec<VarId>,
+    /// Numeric for-loop back-edge (FORNLOOP).
+    /// Edges: LoopBack → body start, LoopExit → exit.
+    ForNumBack {
+        base_reg: u8,
+    },
+    /// Generic for-loop back-edge (FORGLOOP).
+    /// The FORGPREP block jumps unconditionally to this block.
+    /// Edges: LoopBack → body start, LoopExit → exit.
+    ForGenBack {
+        /// Base register (A). Layout: A+0=generator, A+1=state, A+2=index, A+3..=vars.
+        base_reg: u8,
+        /// Number of user-visible loop variables.
+        var_count: u8,
+        /// Iterator expressions (the values loaded before FORGPREP).
+        iterators: Vec<ExprId>,
     },
 }
 
