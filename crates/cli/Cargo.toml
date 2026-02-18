@@ -1,0 +1,20 @@
+[package]
+name = "lantern-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "lantern"
+path = "src/main.rs"
+
+[dependencies]
+lantern-bytecode = { path = "../bytecode" }
+lantern-hir = { path = "../hir" }
+lantern-lift = { path = "../lift" }
+lantern-vars = { path = "../vars" }
+lantern-patterns = { path = "../patterns" }
+lantern-structure = { path = "../structure" }
+lantern-exprs = { path = "../exprs" }
+lantern-emit = { path = "../emit" }
+clap = { workspace = true }
+anyhow = { workspace = true }

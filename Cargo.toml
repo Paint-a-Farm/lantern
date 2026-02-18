@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/bytecode",
+    "crates/hir",
+    "crates/lift",
+    "crates/vars",
+    "crates/patterns",
+    "crates/structure",
+    "crates/exprs",
+    "crates/emit",
+    "crates/cli",
+]
+
+[workspace.dependencies]
+nom = "8"
+petgraph = "0.7"
+rustc-hash = "2"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"

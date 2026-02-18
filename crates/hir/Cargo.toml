@@ -1,0 +1,9 @@
+[package]
+name = "lantern-hir"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+petgraph = { workspace = true }
+rustc-hash = { workspace = true }
+lantern-bytecode = { path = "../bytecode" }

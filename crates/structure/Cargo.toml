@@ -1,0 +1,8 @@
+[package]
+name = "lantern-structure"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lantern-hir = { path = "../hir" }
+petgraph = { workspace = true }

@@ -1,0 +1,10 @@
+[package]
+name = "lantern-lift"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lantern-bytecode = { path = "../bytecode" }
+lantern-hir = { path = "../hir" }
+petgraph = { workspace = true }
+rustc-hash = { workspace = true }
