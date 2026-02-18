@@ -7,7 +7,7 @@ use lantern_hir::cfg::{EdgeKind, Terminator};
 use lantern_hir::expr::HirExpr;
 use lantern_hir::func::HirFunc;
 use lantern_hir::stmt::{ElseIfClause, HirStmt};
-use lantern_hir::types::UnOp;
+use lantern_hir::types::{BinOp, UnOp};
 
 /// Structure a function's CFG into nested HirStmt trees.
 ///
@@ -462,6 +462,21 @@ fn extract_elseif_chain(
 fn negate_condition(func: &mut HirFunc, condition: ExprId) -> ExprId {
     if let HirExpr::Unary { op: UnOp::Not, operand } = func.exprs.get(condition) {
         return *operand;
+    }
+    // Invert comparisons directly instead of wrapping in not()
+    if let HirExpr::Binary { op, left, right } = func.exprs.get(condition).clone() {
+        let inv_op = match op {
+            BinOp::CompareEq => Some(BinOp::CompareNe),
+            BinOp::CompareNe => Some(BinOp::CompareEq),
+            BinOp::CompareLt => Some(BinOp::CompareGe),
+            BinOp::CompareLe => Some(BinOp::CompareGt),
+            BinOp::CompareGt => Some(BinOp::CompareLe),
+            BinOp::CompareGe => Some(BinOp::CompareLt),
+            _ => None,
+        };
+        if let Some(inv_op) = inv_op {
+            return func.exprs.alloc(HirExpr::Binary { op: inv_op, left, right });
+        }
     }
     func.exprs.alloc(HirExpr::Unary {
         op: UnOp::Not,
