@@ -718,13 +718,20 @@ impl<'a> Lifter<'a> {
         }
     }
 
+    /// Resolve AUX word to a string name.
+    /// For GETGLOBAL/SETGLOBAL/GETTABLEKS/SETTABLEKS/NAMECALL, AUX is a
+    /// constant table index pointing to a String constant.
     fn string_from_aux(&self, aux: u32) -> String {
-        let idx = aux as usize;
-        if idx > 0 && idx <= self.chunk.string_table.len() {
-            String::from_utf8_lossy(&self.chunk.string_table[idx - 1]).to_string()
-        } else {
-            format!("__unknown_{}", idx)
+        let const_idx = aux as usize;
+        if const_idx < self.func.constants.len() {
+            if let Constant::String(str_idx) = &self.func.constants[const_idx] {
+                if *str_idx > 0 && *str_idx <= self.chunk.string_table.len() {
+                    return String::from_utf8_lossy(&self.chunk.string_table[*str_idx - 1])
+                        .to_string();
+                }
+            }
         }
+        format!("__unknown_{}", aux)
     }
 
     fn lift_import(&mut self, aux: u32, pc: usize) -> ExprId {

@@ -11,12 +11,15 @@ fn main() {
 
     // Parse flags
     let mut emit_func: Option<usize> = None;
+    let mut raw_mode = false;
     let mut paths = Vec::new();
     let mut i = 0;
     while i < args.len() {
         if args[i] == "--emit" {
             i += 1;
             emit_func = Some(args[i].parse().expect("--emit expects a function index"));
+        } else if args[i] == "--raw" {
+            raw_mode = true;
         } else {
             paths.push(args[i].clone());
         }
@@ -59,15 +62,17 @@ fn main() {
             func_timings.record(PHASE_LIFT, lift_duration);
 
             // Variable recovery: resolve registers → named variables
-            let bc_func = &chunk.functions[func_idx];
-            let ((), vars_duration) = timing::timed(|| {
-                lantern_vars::recover_variables(
-                    &mut hir,
-                    &bc_func.debug.scopes,
-                    bc_func.num_params,
-                );
-            });
-            func_timings.record(PHASE_VARS, vars_duration);
+            if !raw_mode {
+                let bc_func = &chunk.functions[func_idx];
+                let ((), vars_duration) = timing::timed(|| {
+                    lantern_vars::recover_variables(
+                        &mut hir,
+                        &bc_func.debug.scopes,
+                        bc_func.num_params,
+                    );
+                });
+                func_timings.record(PHASE_VARS, vars_duration);
+            }
 
             if verbose {
                 let stmt_count: usize =
