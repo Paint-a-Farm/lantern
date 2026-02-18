@@ -11,12 +11,9 @@ use lantern_hir::stmt::{ElseIfClause, HirStmt, LValue};
 use lantern_hir::types::{BinOp, LuaValue, UnOp};
 use lantern_hir::var::VarId;
 
+use rustc_hash::FxHashSet;
+
 /// Emit a function to Lua source text.
-///
-/// Currently works on unstructured HIR: walks blocks in PC order,
-/// emitting block labels and goto-style control flow. As the
-/// structure/patterns crates recover higher-level constructs,
-/// this will emit proper if/while/for/etc.
 pub fn emit_function(func: &HirFunc) -> String {
     let mut emitter = LuaEmitter::new(func);
     emitter.emit();
@@ -27,14 +24,26 @@ pub struct LuaEmitter<'a> {
     func: &'a HirFunc,
     pub output: String,
     indent: usize,
+    /// Track which local variables have been declared (emitted with `local`).
+    /// Pre-populated with parameters and for-loop variables.
+    declared: FxHashSet<VarId>,
 }
 
 impl<'a> LuaEmitter<'a> {
     pub fn new(func: &'a HirFunc) -> Self {
+        // Pre-declare parameters and loop variables
+        let mut declared = FxHashSet::default();
+        for (var_id, info) in func.vars.iter() {
+            if info.is_param || info.is_loop_var {
+                declared.insert(var_id);
+            }
+        }
+
         Self {
             func,
             output: String::new(),
             indent: 0,
+            declared,
         }
     }
 
@@ -117,6 +126,11 @@ impl<'a> LuaEmitter<'a> {
 
             HirStmt::Assign { target, value } => {
                 self.write_indent();
+                if let LValue::Local(var_id) = target {
+                    if self.declared.insert(*var_id) {
+                        self.output.push_str("local ");
+                    }
+                }
                 self.emit_lvalue(target);
                 self.output.push_str(" = ");
                 self.emit_expr(*value);
@@ -125,6 +139,18 @@ impl<'a> LuaEmitter<'a> {
 
             HirStmt::MultiAssign { targets, values } => {
                 self.write_indent();
+                // If all targets are undeclared locals, emit as `local a, b = ...`
+                let all_new_locals = targets.iter().all(|t| {
+                    matches!(t, LValue::Local(v) if !self.declared.contains(v))
+                });
+                if all_new_locals {
+                    self.output.push_str("local ");
+                    for t in targets {
+                        if let LValue::Local(v) = t {
+                            self.declared.insert(*v);
+                        }
+                    }
+                }
                 for (i, t) in targets.iter().enumerate() {
                     if i > 0 {
                         self.output.push_str(", ");
