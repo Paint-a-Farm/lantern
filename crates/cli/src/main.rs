@@ -1,6 +1,6 @@
 use std::fs;
 
-use lantern_hir::timing::{self, FileTimings, FuncTimings, PipelineReport, PHASE_EMIT, PHASE_LIFT, PHASE_VARS};
+use lantern_hir::timing::{self, FileTimings, FuncTimings, PipelineReport, PHASE_EMIT, PHASE_EXPRS, PHASE_LIFT, PHASE_VARS};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -72,6 +72,12 @@ fn main() {
                     );
                 });
                 func_timings.record(PHASE_VARS, vars_duration);
+
+                // Temporary elimination: inline single-use unnamed variables
+                let ((), exprs_duration) = timing::timed(|| {
+                    lantern_exprs::eliminate_temporaries(&mut hir);
+                });
+                func_timings.record(PHASE_EXPRS, exprs_duration);
             }
 
             if verbose {

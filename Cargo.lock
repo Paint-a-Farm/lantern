@@ -181,6 +181,8 @@ name = "lantern-exprs"
 version = "0.1.0"
 dependencies = [
  "lantern-hir",
+ "petgraph",
+ "rustc-hash",
 ]
 
 [[package]]

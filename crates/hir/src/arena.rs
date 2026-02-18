@@ -1,3 +1,5 @@
+use rustc_hash::FxHashMap;
+
 use crate::expr::HirExpr;
 use crate::var::VarId;
 
@@ -49,6 +51,21 @@ impl ExprArena {
             if let HirExpr::Var(v) = &self.exprs[i] {
                 if *v == var {
                     // Clone the replacement expression into this slot
+                    self.exprs[i] = self.exprs[replacement.0 as usize].clone();
+                }
+            }
+        }
+    }
+
+    /// Batch substitute: replace multiple variables in a single pass.
+    /// Much faster than calling substitute_var() N times (O(n) vs O(n*k)).
+    pub fn substitute_vars_batch(&mut self, subs: &FxHashMap<VarId, ExprId>) {
+        if subs.is_empty() {
+            return;
+        }
+        for i in 0..self.exprs.len() {
+            if let HirExpr::Var(v) = &self.exprs[i] {
+                if let Some(&replacement) = subs.get(v) {
                     self.exprs[i] = self.exprs[replacement.0 as usize].clone();
                 }
             }

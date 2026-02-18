@@ -1,1 +1,3 @@
-// Exprs: Temporary elimination via arena substitution
+mod inline;
+
+pub use inline::eliminate_temporaries;
