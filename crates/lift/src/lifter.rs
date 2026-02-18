@@ -692,14 +692,11 @@ impl<'a> Lifter<'a> {
         self.hir.cfg[self.current_block].stmts.push(stmt);
     }
 
-    fn emit_assign_reg(&mut self, _reg: RegRef, value: ExprId) {
-        // Before variable recovery, we emit assignments to register references.
-        // The vars crate will convert these to proper VarId assignments.
-        // For now, encode as raw assignment.
-        // We use a special internal representation: store as ExprStmt wrapping the assignment.
-        // The actual assignment target will be resolved later.
-        self.emit_stmt(HirStmt::ExprStmt(value));
-        // TODO: track that `value` is assigned to `reg` for constraint generation
+    fn emit_assign_reg(&mut self, reg: RegRef, value: ExprId) {
+        self.emit_stmt(HirStmt::RegAssign {
+            target: reg,
+            value,
+        });
     }
 
     fn lift_constant(&mut self, index: usize, pc: usize) -> ExprId {

@@ -1,6 +1,6 @@
 use crate::arena::ExprId;
 use crate::types::BinOp;
-use crate::var::VarId;
+use crate::var::{RegRef, VarId};
 
 /// A high-level statement in the HIR.
 ///
@@ -116,6 +116,14 @@ pub enum HirStmt {
     /// (CLOSEUPVALS — internal, usually removed before emit)
     CloseUpvals {
         from_register: u8,
+    },
+
+    /// Pre-variable-recovery register assignment.
+    /// The vars crate resolves this to Assign/LocalDecl.
+    /// Internal only — removed before emit.
+    RegAssign {
+        target: RegRef,
+        value: ExprId,
     },
 }
 

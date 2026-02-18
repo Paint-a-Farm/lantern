@@ -303,6 +303,13 @@ impl<'a> LuaEmitter<'a> {
             HirStmt::CloseUpvals { .. } => {
                 // Internal — skip in output
             }
+
+            HirStmt::RegAssign { target, value } => {
+                self.write_indent();
+                let _ = write!(self.output, "r{}_{} = ", target.register, target.pc);
+                self.emit_expr(*value);
+                self.output.push('\n');
+            }
         }
     }
 
