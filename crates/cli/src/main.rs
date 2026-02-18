@@ -1,4 +1,5 @@
 use std::fs;
+use std::path::Path;
 
 use lantern_hir::timing::{self, FileTimings, FuncTimings, PipelineReport, PHASE_EMIT, PHASE_EXPRS, PHASE_LIFT, PHASE_PATTERNS, PHASE_STRUCTURE, PHASE_VARS};
 
@@ -25,6 +26,19 @@ fn main() {
         }
         i += 1;
     }
+
+    // Expand directories into .l64 files recursively
+    let mut expanded_paths = Vec::new();
+    for path in &paths {
+        let p = Path::new(path);
+        if p.is_dir() {
+            collect_l64_files(p, &mut expanded_paths);
+        } else {
+            expanded_paths.push(path.clone());
+        }
+    }
+    expanded_paths.sort();
+    let paths = expanded_paths;
 
     let verbose = paths.len() == 1;
     let mut report = PipelineReport::new();
@@ -73,8 +87,9 @@ fn main() {
                 });
                 func_timings.record(PHASE_VARS, vars_duration);
 
-                // Temporary elimination: inline single-use unnamed variables
+                // Expression simplification: collapse multi-return, then inline temps
                 let ((), exprs_duration) = timing::timed(|| {
+                    lantern_exprs::collapse_multi_returns(&mut hir);
                     lantern_exprs::eliminate_temporaries(&mut hir);
                 });
                 func_timings.record(PHASE_EXPRS, exprs_duration);
@@ -135,5 +150,20 @@ fn main() {
 
     if report.total_functions() > 10 {
         report.print_slowest(15);
+    }
+}
+
+fn collect_l64_files(dir: &Path, out: &mut Vec<String>) {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_l64_files(&path, out);
+        } else if path.extension().is_some_and(|e| e == "l64") {
+            out.push(path.to_string_lossy().into_owned());
+        }
     }
 }

@@ -442,6 +442,21 @@ impl<'a> Lifter<'a> {
                 let result_reg = self.reg_ref(call_insn.a, next_pc);
                 self.emit_assign_reg(result_reg, call_expr);
 
+                // Multi-return: assign Select for each additional result register
+                if nresults > 1 {
+                    for i in 1..nresults {
+                        let select_expr = self.alloc_expr(
+                            HirExpr::Select {
+                                source: call_expr,
+                                index: i as u8,
+                            },
+                            next_pc,
+                        );
+                        let reg = self.reg_ref(call_insn.a + i as u8, next_pc);
+                        self.emit_assign_reg(reg, select_expr);
+                    }
+                }
+
                 // If C=0, this call produces MULTRET results
                 if call_insn.c == 0 {
                     self.top = Some((call_expr, call_insn.a));
@@ -481,6 +496,21 @@ impl<'a> Lifter<'a> {
 
                 let result_reg = self.reg_ref(insn.a, pc);
                 self.emit_assign_reg(result_reg, call_expr);
+
+                // Multi-return: assign Select for each additional result register
+                if nresults > 1 {
+                    for i in 1..nresults {
+                        let select_expr = self.alloc_expr(
+                            HirExpr::Select {
+                                source: call_expr,
+                                index: i as u8,
+                            },
+                            pc,
+                        );
+                        let reg = self.reg_ref(insn.a + i as u8, pc);
+                        self.emit_assign_reg(reg, select_expr);
+                    }
+                }
 
                 // If C=0, this call produces MULTRET results
                 if insn.c == 0 {
@@ -768,6 +798,23 @@ impl<'a> Lifter<'a> {
                 let reg = self.reg_ref(insn.a, pc);
                 let expr = self.alloc_expr(HirExpr::VarArg, pc);
                 self.emit_assign_reg(reg, expr);
+
+                let nresults = if insn.b == 0 { 0 } else { insn.b - 1 };
+                // Multi-capture: assign Select for each additional vararg register
+                if nresults > 1 {
+                    for i in 1..nresults {
+                        let select_expr = self.alloc_expr(
+                            HirExpr::Select {
+                                source: expr,
+                                index: i as u8,
+                            },
+                            pc,
+                        );
+                        let r = self.reg_ref(insn.a + i as u8, pc);
+                        self.emit_assign_reg(r, select_expr);
+                    }
+                }
+
                 // B=0 means capture all varargs (MULTRET producer)
                 if insn.b == 0 {
                     self.top = Some((expr, insn.a));

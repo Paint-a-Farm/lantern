@@ -572,9 +572,10 @@ impl<'a> LuaEmitter<'a> {
             }
 
             HirExpr::Select { source, index } => {
-                self.output.push_str("select(");
+                // Select should be collapsed into MultiAssign before emission.
+                // If it survives, emit as a comment annotation.
+                let _ = write!(self.output, "--[[result #{}]] ", index);
                 self.emit_expr(*source);
-                let _ = write!(self.output, ", {})", index);
             }
         }
     }
