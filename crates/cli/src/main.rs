@@ -1,6 +1,6 @@
 use std::fs;
 
-use lantern_hir::timing::{self, FileTimings, FuncTimings, PipelineReport, PHASE_EMIT, PHASE_LIFT};
+use lantern_hir::timing::{self, FileTimings, FuncTimings, PipelineReport, PHASE_EMIT, PHASE_LIFT, PHASE_VARS};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -54,9 +54,20 @@ fn main() {
 
             let mut func_timings = FuncTimings::new(&func_name);
 
-            let (hir, lift_duration) =
+            let (mut hir, lift_duration) =
                 timing::timed(|| lantern_lift::lift_function(&chunk, func_idx));
             func_timings.record(PHASE_LIFT, lift_duration);
+
+            // Variable recovery: resolve registers → named variables
+            let bc_func = &chunk.functions[func_idx];
+            let ((), vars_duration) = timing::timed(|| {
+                lantern_vars::recover_variables(
+                    &mut hir,
+                    &bc_func.debug.scopes,
+                    bc_func.num_params,
+                );
+            });
+            func_timings.record(PHASE_VARS, vars_duration);
 
             if verbose {
                 let stmt_count: usize =
