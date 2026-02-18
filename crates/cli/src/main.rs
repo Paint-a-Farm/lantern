@@ -61,6 +61,18 @@ fn main() {
             }
         };
 
+        // Temporary: dump debug scopes when DEBUG_SCOPES=1
+        if std::env::var("DEBUG_SCOPES").is_ok() {
+            for (fi, f) in chunk.functions.iter().enumerate() {
+                if emit_func != Some(fi) { continue; }
+                let func_name = chunk.get_string(f.debug.func_name_index).unwrap_or_else(|| format!("fn#{}", fi));
+                eprintln!("=== Debug scopes for {} (fn #{}) ===", func_name, fi);
+                for scope in f.debug.scopes.all_scopes() {
+                    eprintln!("  r{} = '{}' pc {}..{}", scope.register, scope.name, scope.pc_range.start, scope.pc_range.end);
+                }
+            }
+        }
+
         let mut file_timings = FileTimings::new(path.as_str());
         file_timings.parse_time = parse_duration;
 

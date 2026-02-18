@@ -73,7 +73,18 @@ pub fn recover_variables(func: &mut HirFunc, scopes: &ScopeTree, num_params: u8)
                 continue; // Already bound (e.g., parameter)
             }
 
-            if let Some(scope) = find_scope(scopes, register, access.reg.pc) {
+            // For defs, also try pc+1: the bytecode compiler starts the scope
+            // at the instruction AFTER the defining instruction (e.g., CALL at pc 4
+            // defines x, but x's scope starts at pc 5).
+            let scope = find_scope(scopes, register, access.reg.pc)
+                .or_else(|| {
+                    if access.is_def {
+                        find_scope(scopes, register, access.reg.pc + 1)
+                    } else {
+                        None
+                    }
+                });
+            if let Some(scope) = scope {
                 let key = (register, scope.0.to_string(), scope.1);
                 let var_id = *scope_vars.entry(key).or_insert_with(|| {
                     let mut info = VarInfo::new();
