@@ -36,6 +36,11 @@ struct Lifter<'a> {
     block_map: FxHashMap<usize, NodeIndex>,
     /// Current block being built.
     current_block: NodeIndex,
+    /// MULTRET tracking: when a CALL with C=0 or GETVARARGS with B=0
+    /// produces a variable number of results, we record the expression
+    /// and the base register. The next MULTRET consumer (CALL B=0,
+    /// RETURN B=0, SETLIST C=0) uses this to collect the arguments.
+    top: Option<(ExprId, u8)>,
 }
 
 impl<'a> Lifter<'a> {
@@ -63,6 +68,7 @@ impl<'a> Lifter<'a> {
             hir,
             block_map,
             current_block: entry,
+            top: None,
         }
     }
 
@@ -93,6 +99,7 @@ impl<'a> Lifter<'a> {
     }
 
     fn lift_block(&mut self, start_pc: usize, end_pc: usize) {
+        self.top = None; // Reset MULTRET state at block boundary
         let mut pc = start_pc;
         while pc < end_pc {
             let insn = &self.func.instructions[pc];
@@ -382,11 +389,10 @@ impl<'a> Lifter<'a> {
                 // SETLIST A B C AUX: table[AUX+1..AUX+C] = R(B)..R(B+C-1)
                 // We don't restructure this into the table constructor yet —
                 // that's done in the patterns crate.
-                // For now just record it as a statement.
-                let _table_reg = insn.a;
-                let _source_start = insn.b;
-                let _count = insn.c; // 0 = MULTRET
-                let _start_index = insn.aux;
+                // Consume MULTRET top if C=0 to prevent stale state.
+                if insn.c == 0 {
+                    self.top.take();
+                }
                 // TODO: record SETLIST for pattern matching
                 2 // AUX
             }
@@ -401,35 +407,41 @@ impl<'a> Lifter<'a> {
                 let call_insn = &self.func.instructions[next_pc];
                 debug_assert!(call_insn.op == OpCode::Call);
 
-                let nargs = if call_insn.b == 0 { 0 } else { call_insn.b - 1 };
-                let nresults = call_insn.c;
+                let nresults = if call_insn.c == 0 { 0 } else { call_insn.c - 1 };
 
                 // Arguments start at A+2 (A = func, A+1 = self)
-                let args: Vec<ExprId> = (0..nargs.saturating_sub(1))
-                    .map(|i| {
-                        self.alloc_expr(
-                            HirExpr::Reg(self.reg_ref(call_insn.a + 2 + i, next_pc)),
-                            next_pc,
-                        )
-                    })
-                    .collect();
+                // B counts include the implicit self, so explicit args = B-2
+                let args = if call_insn.b == 0 {
+                    // MULTRET args: fixed regs from A+2 to top_reg-1, then top expr
+                    self.collect_multret_args(call_insn.a + 2, next_pc)
+                } else {
+                    let nargs = call_insn.b.saturating_sub(2); // B includes func+self
+                    (0..nargs)
+                        .map(|i| {
+                            self.alloc_expr(
+                                HirExpr::Reg(self.reg_ref(call_insn.a + 2 + i, next_pc)),
+                                next_pc,
+                            )
+                        })
+                        .collect()
+                };
 
                 let call_expr = self.alloc_expr(
                     HirExpr::MethodCall {
                         object: obj,
                         method,
                         args,
-                        result_count: nresults,
+                        result_count: nresults as u8,
                     },
                     pc,
                 );
 
                 let result_reg = self.reg_ref(call_insn.a, next_pc);
-                if nresults == 1 || nresults == 0 {
-                    // Single result or used as statement
-                    self.emit_assign_reg(result_reg, call_expr);
-                } else {
-                    self.emit_assign_reg(result_reg, call_expr);
+                self.emit_assign_reg(result_reg, call_expr);
+
+                // If C=0, this call produces MULTRET results
+                if call_insn.c == 0 {
+                    self.top = Some((call_expr, call_insn.a));
                 }
 
                 3 // NAMECALL + AUX + CALL
@@ -438,50 +450,58 @@ impl<'a> Lifter<'a> {
             // Function calls
             OpCode::Call => {
                 let func_expr = self.alloc_expr(HirExpr::Reg(self.reg_ref(insn.a, pc)), pc);
-                let nargs = if insn.b == 0 { 0 } else { insn.b - 1 };
-                let nresults = insn.c;
+                let nresults = if insn.c == 0 { 0 } else { insn.c - 1 };
 
-                let args: Vec<ExprId> = (0..nargs)
-                    .map(|i| {
-                        self.alloc_expr(
-                            HirExpr::Reg(self.reg_ref(insn.a + 1 + i, pc)),
-                            pc,
-                        )
-                    })
-                    .collect();
+                let args = if insn.b == 0 {
+                    // MULTRET args: fixed regs from A+1 to top_reg-1, then top expr
+                    self.collect_multret_args(insn.a + 1, pc)
+                } else {
+                    let nargs = insn.b - 1;
+                    (0..nargs)
+                        .map(|i| {
+                            self.alloc_expr(
+                                HirExpr::Reg(self.reg_ref(insn.a + 1 + i, pc)),
+                                pc,
+                            )
+                        })
+                        .collect()
+                };
 
                 let call_expr = self.alloc_expr(
                     HirExpr::Call {
                         func: func_expr,
                         args,
-                        result_count: nresults,
+                        result_count: nresults as u8,
                     },
                     pc,
                 );
 
                 let result_reg = self.reg_ref(insn.a, pc);
                 self.emit_assign_reg(result_reg, call_expr);
+
+                // If C=0, this call produces MULTRET results
+                if insn.c == 0 {
+                    self.top = Some((call_expr, insn.a));
+                }
                 1
             }
 
             // Return
             OpCode::Return => {
-                let nvals = if insn.b == 0 {
-                    // MULTRET — for now treat as 0 returns
-                    // TODO: handle MULTRET properly
-                    0
+                let values = if insn.b == 0 {
+                    // MULTRET return: fixed regs A..top_reg-1, then top expr
+                    self.collect_multret_args(insn.a, pc)
                 } else {
-                    insn.b - 1
+                    let nvals = insn.b - 1;
+                    (0..nvals)
+                        .map(|i| {
+                            self.alloc_expr(
+                                HirExpr::Reg(self.reg_ref(insn.a + i, pc)),
+                                pc,
+                            )
+                        })
+                        .collect()
                 };
-
-                let values: Vec<ExprId> = (0..nvals)
-                    .map(|i| {
-                        self.alloc_expr(
-                            HirExpr::Reg(self.reg_ref(insn.a + i, pc)),
-                            pc,
-                        )
-                    })
-                    .collect();
 
                 self.hir.cfg[self.current_block].terminator =
                     lantern_hir::cfg::Terminator::Return(values);
@@ -658,6 +678,10 @@ impl<'a> Lifter<'a> {
                 let reg = self.reg_ref(insn.a, pc);
                 let expr = self.alloc_expr(HirExpr::VarArg, pc);
                 self.emit_assign_reg(reg, expr);
+                // B=0 means capture all varargs (MULTRET producer)
+                if insn.b == 0 {
+                    self.top = Some((expr, insn.a));
+                }
                 1
             }
 
@@ -690,6 +714,24 @@ impl<'a> Lifter<'a> {
 
     fn emit_stmt(&mut self, stmt: HirStmt) {
         self.hir.cfg[self.current_block].stmts.push(stmt);
+    }
+
+    /// Collect arguments for a MULTRET consumer.
+    ///
+    /// When B=0 in CALL/RETURN, the arguments extend from `from_reg` up to
+    /// the register where the previous MULTRET producer placed its results,
+    /// with the MULTRET expression itself as the final argument.
+    fn collect_multret_args(&mut self, from_reg: u8, pc: usize) -> Vec<ExprId> {
+        let mut args = Vec::new();
+        if let Some((top_expr, top_reg)) = self.top.take() {
+            // Collect fixed registers between from_reg and top_reg
+            for r in from_reg..top_reg {
+                args.push(self.alloc_expr(HirExpr::Reg(self.reg_ref(r, pc)), pc));
+            }
+            // The MULTRET expression is the last argument
+            args.push(top_expr);
+        }
+        args
     }
 
     fn emit_assign_reg(&mut self, reg: RegRef, value: ExprId) {
