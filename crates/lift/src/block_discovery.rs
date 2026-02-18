@@ -10,12 +10,23 @@ use rustc_hash::FxHashSet;
 /// - The instruction after any jump/branch (fallthrough)
 /// - RETURN instructions end a block
 ///
+/// `suppressed_pcs` contains PCs of instructions (e.g. conditional jumps
+/// inside boolean value computations) that should NOT create block boundaries.
+///
 /// Returns a sorted set of block-start PCs.
-pub fn discover_block_starts(instructions: &[Instruction]) -> Vec<usize> {
+pub fn discover_block_starts(
+    instructions: &[Instruction],
+    suppressed_pcs: &FxHashSet<usize>,
+) -> Vec<usize> {
     let mut starts = FxHashSet::default();
     starts.insert(0);
 
     for (pc, insn) in instructions.iter().enumerate() {
+        // Skip instructions that are inside boolean value regions
+        if suppressed_pcs.contains(&pc) {
+            continue;
+        }
+
         match insn.op {
             // LOADB with C != 0 is a conditional jump
             OpCode::LoadB => {
@@ -134,7 +145,7 @@ mod tests {
             Instruction { op: OpCode::Add, a: 2, b: 0, c: 1, d: 0, e: 0, aux: 0 },
             Instruction { op: OpCode::Return, a: 2, b: 2, c: 0, d: 0, e: 0, aux: 0 },
         ];
-        let starts = discover_block_starts(&insns);
+        let starts = discover_block_starts(&insns, &FxHashSet::default());
         // Only one block: PC 0
         assert_eq!(starts, vec![0]);
     }
@@ -151,7 +162,7 @@ mod tests {
             Instruction { op: OpCode::LoadN, a: 1, b: 0, c: 0, d: 20, e: 0, aux: 0 },
             Instruction { op: OpCode::Return, a: 1, b: 2, c: 0, d: 0, e: 0, aux: 0 },
         ];
-        let starts = discover_block_starts(&insns);
+        let starts = discover_block_starts(&insns, &FxHashSet::default());
         // Blocks: 0, 2 (fallthrough after JUMPIF), 4 (jump target)
         assert_eq!(starts, vec![0, 2, 4]);
     }
