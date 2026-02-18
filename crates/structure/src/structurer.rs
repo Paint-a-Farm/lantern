@@ -6,8 +6,9 @@ use lantern_hir::arena::ExprId;
 use lantern_hir::cfg::{EdgeKind, Terminator};
 use lantern_hir::expr::HirExpr;
 use lantern_hir::func::HirFunc;
-use lantern_hir::stmt::{ElseIfClause, HirStmt};
+use lantern_hir::stmt::{ElseIfClause, HirStmt, LValue};
 use lantern_hir::types::{BinOp, UnOp};
+use lantern_hir::var::VarId;
 
 /// Structure a function's CFG into nested HirStmt trees.
 ///
@@ -621,6 +622,13 @@ fn structure_for_gen(
         exit: exit_node,
     };
 
+    // Try to inline iterator temp assignments from the prep block.
+    // Before the for-loop, the prep block emits something like:
+    //   local _v10, _v21, _v2 = pairs(_G)
+    // and the iterators are [Var(_v10), Var(_v21), Var(_v2)].
+    // We fold that into: for k, v in pairs(_G) do
+    let iterators = try_inline_for_gen_iterators(func, &iterators, result);
+
     // Structure the body, stopping before the ForGenBack node itself (back-edge)
     let body_stmts = structure_region(func, body_start, Some(node), Some(&loop_ctx), visited);
 
@@ -631,6 +639,108 @@ fn structure_for_gen(
     });
 
     exit_node
+}
+
+/// Try to inline iterator temp assignments into generic for-loop headers.
+///
+/// Looks at the last statement(s) in `result` to see if they define the
+/// variables referenced by the iterator expressions. If so, replaces the
+/// iterator list with the actual call expressions and removes the temp
+/// assignments.
+///
+/// Handles two patterns:
+/// 1. MultiAssign: `_v10, _v21, _v2 = pairs(t)` with iterators [Var(_v10), Var(_v21), Var(_v2)]
+///    → iterators become [pairs(t)]
+/// 2. Sequence of Assigns: `_v10 = f`, `_v21 = s`, `_v2 = c` with matching iterators
+///    → iterators become [f, s, c] (though this is less common)
+fn try_inline_for_gen_iterators(
+    func: &HirFunc,
+    iterators: &[ExprId],
+    result: &mut Vec<HirStmt>,
+) -> Vec<ExprId> {
+    if result.is_empty() || iterators.is_empty() {
+        return iterators.to_vec();
+    }
+
+    // Extract VarIds from iterator expressions (all must be Var references)
+    let iter_vars: Vec<VarId> = iterators
+        .iter()
+        .filter_map(|&expr_id| {
+            if let HirExpr::Var(var_id) = func.exprs.get(expr_id) {
+                Some(*var_id)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if iter_vars.len() != iterators.len() {
+        // Not all iterators are simple Var references — can't inline
+        return iterators.to_vec();
+    }
+
+    // Pattern 1: Last statement is MultiAssign with matching targets
+    if let Some(HirStmt::MultiAssign { targets, values }) = result.last() {
+        let target_vars: Vec<Option<VarId>> = targets
+            .iter()
+            .map(|t| {
+                if let LValue::Local(v) = t {
+                    Some(*v)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if target_vars.len() == iter_vars.len()
+            && target_vars
+                .iter()
+                .zip(iter_vars.iter())
+                .all(|(tv, iv)| *tv == Some(*iv))
+        {
+            // All targets match — check that the temps are unnamed (compiler-generated)
+            let all_unnamed = iter_vars
+                .iter()
+                .all(|v| func.vars.get(*v).name.is_none());
+            if all_unnamed {
+                let new_iterators = values.clone();
+                result.pop(); // Remove the MultiAssign
+                return new_iterators;
+            }
+        }
+    }
+
+    // Pattern 2: Last N statements are individual Assigns matching the iterator vars
+    if result.len() >= iter_vars.len() {
+        let start = result.len() - iter_vars.len();
+        let mut matched = true;
+        let mut new_iterators = Vec::new();
+
+        for (i, &var_id) in iter_vars.iter().enumerate() {
+            if let HirStmt::Assign {
+                target: LValue::Local(tv),
+                value,
+            } = &result[start + i]
+            {
+                if *tv == var_id && func.vars.get(var_id).name.is_none() {
+                    new_iterators.push(*value);
+                } else {
+                    matched = false;
+                    break;
+                }
+            } else {
+                matched = false;
+                break;
+            }
+        }
+
+        if matched {
+            result.truncate(start); // Remove the Assign statements
+            return new_iterators;
+        }
+    }
+
+    iterators.to_vec()
 }
 
 /// Find the ForNumBack block reachable from `body_start`, avoiding `header`.
