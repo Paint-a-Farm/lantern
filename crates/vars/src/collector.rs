@@ -27,7 +27,7 @@ pub fn collect_accesses(func: &HirFunc) -> Vec<RegAccess> {
             collect_from_stmt(func, stmt, &mut accesses);
         }
 
-        collect_from_terminator(func, &block.terminator, block.pc_range.0, &mut accesses);
+        collect_from_terminator(func, &block.terminator, block.pc_range, &mut accesses);
     }
 
     accesses
@@ -160,7 +160,8 @@ fn collect_from_stmt(func: &HirFunc, stmt: &HirStmt, out: &mut Vec<RegAccess>) {
     }
 }
 
-fn collect_from_terminator(func: &HirFunc, term: &Terminator, block_pc: usize, out: &mut Vec<RegAccess>) {
+fn collect_from_terminator(func: &HirFunc, term: &Terminator, pc_range: (usize, usize), out: &mut Vec<RegAccess>) {
+    let _block_pc = pc_range.0;
     match term {
         Terminator::Branch { condition } => {
             collect_from_expr(func, *condition, out);
@@ -170,30 +171,20 @@ fn collect_from_terminator(func: &HirFunc, term: &Terminator, block_pc: usize, o
                 collect_from_expr(func, *v, out);
             }
         }
-        Terminator::ForNumPrep { base_reg, start, limit, step } => {
-            // The for-loop expressions are uses of registers loaded before FORNPREP
+        Terminator::ForNumPrep { start, limit, step, .. } => {
+            // The for-loop expressions are uses of registers loaded before FORNPREP.
+            // Loop variable names are resolved during lifting and stored in the
+            // terminator — no register def needed here for naming.
             collect_from_expr(func, *start, out);
             collect_from_expr(func, *limit, out);
             if let Some(s) = step {
                 collect_from_expr(func, *s, out);
             }
-            // Loop variable (A+3) is implicitly defined by the for-loop
-            out.push(RegAccess {
-                reg: RegRef { register: base_reg + 3, pc: block_pc },
-                is_def: true,
-            });
         }
         Terminator::ForNumBack { .. } => {}
-        Terminator::ForGenBack { base_reg, var_count, iterators } => {
+        Terminator::ForGenBack { iterators, .. } => {
             for iter in iterators {
                 collect_from_expr(func, *iter, out);
-            }
-            // Loop variables (A+3..A+2+var_count) are implicitly defined
-            for i in 0..*var_count {
-                out.push(RegAccess {
-                    reg: RegRef { register: base_reg + 3 + i, pc: block_pc },
-                    is_def: true,
-                });
             }
         }
         Terminator::None | Terminator::Jump => {}

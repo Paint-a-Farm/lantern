@@ -49,6 +49,9 @@ pub struct HirFunc {
     /// When true, the emitter should only walk `cfg[entry].stmts` recursively
     /// instead of iterating all blocks.
     pub structured: bool,
+
+    /// Line info from bytecode debug data, preserved for downstream emission.
+    pub line_info: Option<lantern_bytecode::function::LineInfo>,
 }
 
 impl HirFunc {
@@ -69,6 +72,7 @@ impl HirFunc {
             upvalue_names: Vec::new(),
             name: None,
             structured: false,
+            line_info: None,
         }
     }
 

@@ -151,7 +151,12 @@ pub fn recover_variables(func: &mut HirFunc, scopes: &ScopeTree, num_params: u8)
         }
     }
 
-    // Phase 5: Rewrite the HIR — replace RegRef with VarId
+    // Phase 5: Populate reg_map for later lookup (e.g., for-loop variable resolution)
+    for (reg, &var_id) in def_var.iter().chain(use_var.iter()) {
+        func.vars.bind_reg(*reg, var_id);
+    }
+
+    // Phase 6: Rewrite the HIR — replace RegRef with VarId
     rewrite_func(func, &def_var, &use_var);
 }
 

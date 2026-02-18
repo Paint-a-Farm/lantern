@@ -50,6 +50,7 @@ impl<'a> Lifter<'a> {
         hir.is_vararg = func.is_vararg;
         hir.num_upvalues = func.num_upvalues;
         hir.name = chunk.get_string(func.debug.func_name_index);
+        hir.line_info = func.debug.line_info.clone();
 
         // Set up upvalue names from debug info
         hir.upvalue_names = func
@@ -632,11 +633,17 @@ impl<'a> Lifter<'a> {
 
             // Numeric for-loop
             OpCode::ForNPrep => {
-                // Register layout: A+0=limit, A+1=step, A+2=index(start), A+3=var
+                // Register layout: A+0=limit, A+1=step, A+2=index(=user variable)
                 let base = insn.a;
                 let limit = self.alloc_expr(HirExpr::Reg(self.reg_ref(base, pc)), pc);
                 let step = self.alloc_expr(HirExpr::Reg(self.reg_ref(base + 1, pc)), pc);
                 let start = self.alloc_expr(HirExpr::Reg(self.reg_ref(base + 2, pc)), pc);
+
+                // Look up loop variable name from debug info — the user-visible
+                // variable is at A+2 and its scope starts at the body (pc+1).
+                let loop_var_name = self.func.debug.scopes
+                    .lookup(base + 2, pc + 1)
+                    .map(|s| s.to_string());
 
                 // TODO: elide step when it's trivially 1 (store None)
                 let body_pc = pc + 1;
@@ -648,6 +655,7 @@ impl<'a> Lifter<'a> {
                         start,
                         limit,
                         step: Some(step),
+                        loop_var_name,
                     };
 
                 // Body edge (LoopBack) and exit edge (LoopExit)
@@ -726,11 +734,22 @@ impl<'a> Lifter<'a> {
                 // The FORGPREP block stored iterators before jumping here.
                 let iterators = self.find_forgen_iterators();
 
+                // Look up loop variable names from debug info — variables are at
+                // A+3..A+2+var_count and their scope starts at the body.
+                let loop_var_names: Vec<Option<String>> = (0..var_count)
+                    .map(|i| {
+                        self.func.debug.scopes
+                            .lookup(base + 3 + i, body_pc)
+                            .map(|s| s.to_string())
+                    })
+                    .collect();
+
                 self.hir.cfg[self.current_block].terminator =
                     lantern_hir::cfg::Terminator::ForGenBack {
                         base_reg: base,
                         var_count,
                         iterators,
+                        loop_var_names,
                     };
 
                 if let Some(&body_node) = self.block_map.get(&body_pc) {

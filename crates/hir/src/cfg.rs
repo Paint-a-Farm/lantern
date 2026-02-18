@@ -47,12 +47,14 @@ pub enum Terminator {
     /// The block's stmts contain the limit/step/init assignments.
     /// Edges: LoopBack → body start, LoopExit → after loop.
     ForNumPrep {
-        /// Base register (A). Layout: A+0=limit, A+1=step, A+2=index, A+3=var.
+        /// Base register (A). Layout: A+0=limit, A+1=step, A+2=index(=var).
         base_reg: u8,
         /// Expressions for start, limit, step that were loaded before FORNPREP.
         start: ExprId,
         limit: ExprId,
         step: Option<ExprId>,
+        /// Loop variable name from debug info (resolved during lifting).
+        loop_var_name: Option<String>,
     },
     /// Numeric for-loop back-edge (FORNLOOP).
     /// Edges: LoopBack → body start, LoopExit → exit.
@@ -69,6 +71,8 @@ pub enum Terminator {
         var_count: u8,
         /// Iterator expressions (the values loaded before FORGPREP).
         iterators: Vec<ExprId>,
+        /// Loop variable names from debug info (resolved during lifting).
+        loop_var_names: Vec<Option<String>>,
     },
 }
 

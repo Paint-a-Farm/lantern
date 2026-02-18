@@ -97,12 +97,13 @@ fn structure_region(
                 current = structure_branch(func, node, condition, stop, loop_ctx, visited, &mut result);
             }
 
-            Terminator::ForNumPrep { base_reg, start, limit, step } => {
+            Terminator::ForNumPrep { base_reg, start, limit, step, ref loop_var_name } => {
                 let start = *start;
                 let limit = *limit;
                 let step = *step;
                 let base_reg = *base_reg;
-                current = structure_for_num(func, node, base_reg, start, limit, step, stop, loop_ctx, visited, &mut result);
+                let loop_var_name = loop_var_name.clone();
+                current = structure_for_num(func, node, base_reg, start, limit, step, loop_var_name, stop, loop_ctx, visited, &mut result);
             }
 
             Terminator::ForNumBack { .. } => {
@@ -111,11 +112,12 @@ fn structure_region(
                 current = None;
             }
 
-            Terminator::ForGenBack { base_reg, var_count, ref iterators } => {
+            Terminator::ForGenBack { base_reg, var_count, ref iterators, ref loop_var_names } => {
                 let base_reg = *base_reg;
                 let var_count = *var_count;
                 let iterators = iterators.clone();
-                current = structure_for_gen(func, node, base_reg, var_count, iterators, stop, loop_ctx, visited, &mut result);
+                let loop_var_names = loop_var_names.clone();
+                current = structure_for_gen(func, node, base_reg, var_count, iterators, loop_var_names, stop, loop_ctx, visited, &mut result);
             }
         }
     }
@@ -315,6 +317,9 @@ fn try_structure_while(
 }
 
 /// Check if any node reachable from `start` has a direct edge to `header`.
+///
+/// Skips LoopBack edges from ForNumBack/ForGenBack terminators — those
+/// belong to for-loops and should not trigger while-loop detection.
 fn has_back_edge_to(
     cfg: &lantern_hir::cfg::CfgGraph,
     start: NodeIndex,
@@ -326,7 +331,15 @@ fn has_back_edge_to(
         if node == header || !visited.insert(node) {
             continue;
         }
+        // Don't follow for-loop back-edges — they're not while-loop structure
+        let is_for_back = matches!(
+            cfg[node].terminator,
+            Terminator::ForNumBack { .. } | Terminator::ForGenBack { .. }
+        );
         for e in cfg.edges(node) {
+            if is_for_back && e.weight().kind == EdgeKind::LoopBack {
+                continue;
+            }
             if e.target() == header {
                 return true;
             }
@@ -495,10 +508,11 @@ fn extract_elseif_chain(
 fn structure_for_num(
     func: &mut HirFunc,
     node: NodeIndex,
-    base_reg: u8,
+    _base_reg: u8,
     start: ExprId,
     limit: ExprId,
     step: Option<ExprId>,
+    loop_var_name: Option<String>,
     stop: Option<NodeIndex>,
     _outer_loop: Option<&LoopCtx>,
     visited: &mut FxHashSet<NodeIndex>,
@@ -524,13 +538,11 @@ fn structure_for_num(
     // reachable from the body. We structure the body stopping at the back-edge block.
     let back_block = find_for_back_block(func, body_start, node);
 
-    // Look up the loop variable VarId: it's at register base_reg+3.
-    // The vars pass should have assigned a VarId to this register at the prep block's PC.
-    let prep_pc = func.cfg[node].pc_range.0;
-    let var = func.vars.lookup_reg(&lantern_hir::var::RegRef {
-        register: base_reg + 3,
-        pc: prep_pc,
-    }).unwrap_or(lantern_hir::var::VarId(0));
+    // Create loop variable VarId from the name resolved during lifting.
+    let mut var_info = lantern_hir::var::VarInfo::new();
+    var_info.name = loop_var_name;
+    var_info.is_loop_var = true;
+    let var = func.vars.alloc(var_info);
 
     // Set up loop context for break/continue inside the body
     let loop_ctx = LoopCtx {
@@ -568,9 +580,10 @@ fn structure_for_num(
 fn structure_for_gen(
     func: &mut HirFunc,
     node: NodeIndex,
-    base_reg: u8,
+    _base_reg: u8,
     var_count: u8,
     iterators: Vec<ExprId>,
+    loop_var_names: Vec<Option<String>>,
     _stop: Option<NodeIndex>,
     _outer_loop: Option<&LoopCtx>,
     visited: &mut FxHashSet<NodeIndex>,
@@ -592,14 +605,13 @@ fn structure_for_gen(
         None => return exit_node,
     };
 
-    // Look up loop variable VarIds: registers base_reg+3 .. base_reg+2+var_count
-    let block_pc = func.cfg[node].pc_range.0;
+    // Create loop variable VarIds from names resolved during lifting.
     let vars: Vec<lantern_hir::var::VarId> = (0..var_count)
         .map(|i| {
-            func.vars.lookup_reg(&lantern_hir::var::RegRef {
-                register: base_reg + 3 + i,
-                pc: block_pc,
-            }).unwrap_or(lantern_hir::var::VarId(0))
+            let mut var_info = lantern_hir::var::VarInfo::new();
+            var_info.name = loop_var_names.get(i as usize).cloned().flatten();
+            var_info.is_loop_var = true;
+            func.vars.alloc(var_info)
         })
         .collect();
 
