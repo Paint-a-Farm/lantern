@@ -76,6 +76,9 @@ pub enum HirExpr {
         func: ExprId,
         args: Vec<ExprId>,
         result_count: u8,
+        /// FASTCALL builtin ID if this call was preceded by a FASTCALL hint.
+        /// 0 = not a fastcall. See LuauBuiltinFunction in Bytecode.h.
+        builtin_id: u8,
     },
 
     /// Method call: `obj:method(args...)`

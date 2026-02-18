@@ -52,6 +52,13 @@ pub struct HirFunc {
 
     /// Line info from bytecode debug data, preserved for downstream emission.
     pub line_info: Option<lantern_bytecode::function::LineInfo>,
+
+    /// Raw type_info bytes from bytecode (version 4+).
+    /// Encoding: [VarInt func_sig_len, VarInt upval_count, VarInt local_count,
+    ///            func_sig bytes..., upval type bytes..., local entries...]
+    /// Where func_sig: byte[0]=LBC_TYPE_FUNCTION, byte[1]=num_params, byte[2..]=param types
+    /// Local entry: (type: u8, reg: u8, startpc: VarInt, delta: VarInt where endpc=startpc+delta)
+    pub type_info: Vec<u8>,
 }
 
 impl HirFunc {
@@ -73,6 +80,7 @@ impl HirFunc {
             name: None,
             structured: false,
             line_info: None,
+            type_info: Vec::new(),
         }
     }
 

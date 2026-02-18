@@ -17,6 +17,8 @@ pub struct HirBlock {
     /// Generic for-loop setup: iterator expressions from a FORGPREP block.
     /// The structurer consumes these when building GenericFor statements.
     pub for_gen_iterators: Option<Vec<ExprId>>,
+    /// FORGPREP variant (which opcode was used). Propagated to FORGLOOP's terminator.
+    pub for_gen_variant: Option<ForGenVariant>,
 }
 
 impl HirBlock {
@@ -26,6 +28,7 @@ impl HirBlock {
             terminator: Terminator::None,
             pc_range: (0, 0),
             for_gen_iterators: None,
+            for_gen_variant: None,
         }
     }
 }
@@ -73,7 +76,20 @@ pub enum Terminator {
         iterators: Vec<ExprId>,
         /// Loop variable names from debug info (resolved during lifting).
         loop_var_names: Vec<Option<String>>,
+        /// Which FORGPREP variant was used (generic, ipairs, pairs/next).
+        variant: ForGenVariant,
     },
+}
+
+/// Which FORGPREP variant was used for a generic for-loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForGenVariant {
+    /// FORGPREP — generic iterator (user-defined generator function).
+    Generic,
+    /// FORGPREP_INEXT — optimized for ipairs() iteration.
+    IPairs,
+    /// FORGPREP_NEXT — optimized for pairs()/next() iteration.
+    Pairs,
 }
 
 /// Edge metadata in the CFG.

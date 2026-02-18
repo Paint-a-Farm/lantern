@@ -42,6 +42,9 @@ struct Lifter<'a> {
     /// and the base register. The next MULTRET consumer (CALL B=0,
     /// RETURN B=0, SETLIST C=0) uses this to collect the arguments.
     top: Option<(ExprId, u8)>,
+    /// Pending FASTCALL builtin ID: set by FASTCALL* instructions,
+    /// consumed by the next CALL instruction. 0 = no pending fastcall.
+    pending_fastcall: u8,
 }
 
 impl<'a> Lifter<'a> {
@@ -51,6 +54,7 @@ impl<'a> Lifter<'a> {
         hir.num_upvalues = func.num_upvalues;
         hir.name = chunk.get_string(func.debug.func_name_index);
         hir.line_info = func.debug.line_info.clone();
+        hir.type_info = func.type_info.clone();
 
         // Set up upvalue names from debug info
         hir.upvalue_names = func
@@ -71,6 +75,7 @@ impl<'a> Lifter<'a> {
             block_map,
             current_block: entry,
             top: None,
+            pending_fastcall: 0,
         }
     }
 
@@ -486,11 +491,13 @@ impl<'a> Lifter<'a> {
                         .collect()
                 };
 
+                let builtin_id = std::mem::take(&mut self.pending_fastcall);
                 let call_expr = self.alloc_expr(
                     HirExpr::Call {
                         func: func_expr,
                         args,
                         result_count: nresults as u8,
+                        builtin_id,
                     },
                     pc,
                 );
@@ -714,8 +721,15 @@ impl<'a> Lifter<'a> {
                     self.alloc_expr(HirExpr::Reg(self.reg_ref(base + 2, pc)), pc),
                 ];
 
-                // Store iterators in the block for the structurer to pick up
+                let variant = match insn.op {
+                    OpCode::ForGPrepINext => lantern_hir::cfg::ForGenVariant::IPairs,
+                    OpCode::ForGPrepNext => lantern_hir::cfg::ForGenVariant::Pairs,
+                    _ => lantern_hir::cfg::ForGenVariant::Generic,
+                };
+
+                // Store iterators and variant in the block for the structurer to pick up
                 self.hir.cfg[self.current_block].for_gen_iterators = Some(iterators);
+                self.hir.cfg[self.current_block].for_gen_variant = Some(variant);
 
                 let target = ((pc + 1) as i64 + insn.d as i64) as usize;
                 self.add_jump_edge(target);
@@ -730,9 +744,9 @@ impl<'a> Lifter<'a> {
                 let body_pc = ((pc + 1) as i64 + insn.d as i64) as usize;
                 let exit_pc = pc + 2; // skip AUX word
 
-                // Look for iterator info from the FORGPREP block that jumps to us.
-                // The FORGPREP block stored iterators before jumping here.
+                // Look for iterator info and variant from the FORGPREP block that jumps to us.
                 let iterators = self.find_forgen_iterators();
+                let variant = self.find_forgen_variant();
 
                 // Look up loop variable names from debug info — variables are at
                 // A+3..A+2+var_count and their scope starts at the body.
@@ -750,6 +764,7 @@ impl<'a> Lifter<'a> {
                         var_count,
                         iterators,
                         loop_var_names,
+                        variant,
                     };
 
                 if let Some(&body_node) = self.block_map.get(&body_pc) {
@@ -841,17 +856,28 @@ impl<'a> Lifter<'a> {
                 1
             }
 
-            // FASTCALL variants — these are optimization hints followed by a real CALL.
-            // We skip them and let the CALL handle the actual semantics.
+            // FASTCALL variants — optimization hints followed by a real CALL.
+            // Record the builtin ID so the next CALL carries it.
             OpCode::FastCall => {
-                // FASTCALL A C: skip C instructions to get to the CALL
-                // The CALL following handles everything
+                self.pending_fastcall = insn.a;
                 1
             }
-            OpCode::FastCall1 => 1,
-            OpCode::FastCall2 => 2, // has AUX
-            OpCode::FastCall2K => 2, // has AUX
-            OpCode::FastCall3 => 2, // has AUX
+            OpCode::FastCall1 => {
+                self.pending_fastcall = insn.a;
+                1
+            }
+            OpCode::FastCall2 => {
+                self.pending_fastcall = insn.a;
+                2 // has AUX
+            }
+            OpCode::FastCall2K => {
+                self.pending_fastcall = insn.a;
+                2 // has AUX
+            }
+            OpCode::FastCall3 => {
+                self.pending_fastcall = insn.a;
+                2 // has AUX
+            }
 
         }
     }
@@ -907,6 +933,15 @@ impl<'a> Lifter<'a> {
             }
         }
         Vec::new()
+    }
+
+    fn find_forgen_variant(&self) -> lantern_hir::cfg::ForGenVariant {
+        for pred in self.hir.cfg.neighbors_directed(self.current_block, Direction::Incoming) {
+            if let Some(variant) = self.hir.cfg[pred].for_gen_variant {
+                return variant;
+            }
+        }
+        lantern_hir::cfg::ForGenVariant::Generic
     }
 
     fn lift_constant(&mut self, index: usize, pc: usize) -> ExprId {

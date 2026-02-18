@@ -66,7 +66,7 @@ fn main() {
             for (fi, f) in chunk.functions.iter().enumerate() {
                 if emit_func != Some(fi) { continue; }
                 let func_name = chunk.get_string(f.debug.func_name_index).unwrap_or_else(|| format!("fn#{}", fi));
-                eprintln!("=== Debug scopes for {} (fn #{}) ===", func_name, fi);
+                eprintln!("=== Debug scopes for {} (fn #{}) — {} entries ===", func_name, fi, f.debug.scopes.all_scopes().len());
                 for scope in f.debug.scopes.all_scopes() {
                     eprintln!("  r{} = '{}' pc {}..{}", scope.register, scope.name, scope.pc_range.start, scope.pc_range.end);
                 }

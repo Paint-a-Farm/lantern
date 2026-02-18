@@ -113,7 +113,7 @@ fn structure_region(
                 current = None;
             }
 
-            Terminator::ForGenBack { base_reg, var_count, ref iterators, ref loop_var_names } => {
+            Terminator::ForGenBack { base_reg, var_count, ref iterators, ref loop_var_names, .. } => {
                 let base_reg = *base_reg;
                 let var_count = *var_count;
                 let iterators = iterators.clone();
