@@ -1,4 +1,4 @@
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use lantern_hir::arena::ExprId;
 use lantern_hir::expr::HirExpr;
@@ -17,6 +17,8 @@ use lantern_hir::var::VarId;
 /// expression arena with the temp's RHS expression, then remove the dead
 /// assignment statement. This is O(1) per inline thanks to the arena.
 ///
+/// Works on both flat CFG blocks and structured (nested) statements.
+///
 /// Iterates until no more temporaries can be eliminated.
 pub fn eliminate_temporaries(func: &mut HirFunc) {
     loop {
@@ -33,174 +35,192 @@ fn inline_pass(func: &mut HirFunc) -> usize {
     // Step 1: Count uses of each VarId across all expressions and statements.
     let use_counts = count_uses(func);
 
-    // Step 2: Find inline candidates — single-def, single-use (or zero-use)
-    // unnamed temporaries where the def is a simple Assign in a block.
-    let mut candidates: Vec<InlineCandidate> = Vec::new();
+    // Step 2: Find inline candidates by walking all stmts (including nested).
+    let mut single_use: FxHashMap<VarId, ExprId> = FxHashMap::default();
+    let mut dead_stores: FxHashSet<VarId> = FxHashSet::default();
+    let mut dead_calls: FxHashSet<VarId> = FxHashSet::default();
+    let mut dead_call_extracts: FxHashSet<VarId> = FxHashSet::default();
 
     for node_idx in func.cfg.node_indices() {
         let block = &func.cfg[node_idx];
-        for (stmt_idx, stmt) in block.stmts.iter().enumerate() {
-            if let HirStmt::Assign {
-                target: LValue::Local(var_id),
-                value,
-            } = stmt
-            {
-                let info = func.vars.get(*var_id);
-                let has_name = info.name.is_some();
-                let is_closure = matches!(func.exprs.get(*value), HirExpr::Closure { .. });
-
-                // Named variables are generally kept (not inlined), except:
-                // - Closures with exactly 1 use can be inlined at the call site
-                //   (e.g., `local sort = function(a,b) ... end; table.sort(t, sort)`
-                //   → `table.sort(t, function(a,b) ... end)`)
-                let uses = use_counts.get(var_id).copied().unwrap_or(0);
-
-                if has_name && !(is_closure && uses == 1) {
-                    continue;
-                }
-
-                if uses == 0 {
-                    if !expr_has_side_effects(func, *value) {
-                        // Dead store with no side effects — remove entirely
-                        candidates.push(InlineCandidate {
-                            var_id: *var_id,
-                            value_expr: *value,
-                            node_idx,
-                            stmt_idx,
-                            kind: InlineKind::DeadStore,
-                        });
-                    } else if is_statement_expr(func, *value) {
-                        // Dead store with side effects and value is a valid statement
-                        // expression (Call/MethodCall). Convert: `_v = func()` → `func()`
-                        candidates.push(InlineCandidate {
-                            var_id: *var_id,
-                            value_expr: *value,
-                            node_idx,
-                            stmt_idx,
-                            kind: InlineKind::DeadCall,
-                        });
-                    } else {
-                        // Dead store with side effects wrapped in a non-statement expr
-                        // (e.g., `_v = { func() }` or `_v = a or b()`).
-                        // Extract the side-effectful calls as separate ExprStmts.
-                        candidates.push(InlineCandidate {
-                            var_id: *var_id,
-                            value_expr: *value,
-                            node_idx,
-                            stmt_idx,
-                            kind: InlineKind::DeadCallExtract,
-                        });
-                    }
-                } else if uses == 1 {
-                    // Single-use temporary — inline the expression.
-                    // Table constructors can't be used as field/index access targets
-                    // in Lua syntax (e.g., `{}.field` is invalid).
-                    if matches!(func.exprs.get(*value), HirExpr::Table { .. })
-                        && is_var_used_as_table_target(func, *var_id)
-                    {
-                        continue;
-                    }
-                    candidates.push(InlineCandidate {
-                        var_id: *var_id,
-                        value_expr: *value,
-                        node_idx,
-                        stmt_idx,
-                        kind: InlineKind::SingleUse,
-                    });
-                }
-            }
-        }
+        find_candidates_in_stmts(
+            &block.stmts,
+            func,
+            &use_counts,
+            &mut single_use,
+            &mut dead_stores,
+            &mut dead_calls,
+            &mut dead_call_extracts,
+        );
     }
 
-    if candidates.is_empty() {
+    let total = single_use.len() + dead_stores.len() + dead_calls.len() + dead_call_extracts.len();
+    if total == 0 {
         return 0;
     }
 
-    // Step 3: Apply inlines.
-    // Process in reverse statement order within each block so that removing
-    // statements doesn't invalidate earlier indices.
-    candidates.sort_by(|a, b| {
-        a.node_idx
-            .index()
-            .cmp(&b.node_idx.index())
-            .then(b.stmt_idx.cmp(&a.stmt_idx)) // reverse stmt order
-    });
-
     // Step 3: Apply arena substitutions for single-use inlines (batch)
-    let subs: FxHashMap<VarId, ExprId> = candidates
-        .iter()
-        .filter(|c| matches!(c.kind, InlineKind::SingleUse))
-        .map(|c| (c.var_id, c.value_expr))
-        .collect();
-    func.exprs.substitute_vars_batch(&subs);
+    func.exprs.substitute_vars_batch(&single_use);
 
-    let inlined = candidates.len();
-
-    // Step 4: Modify/remove statements.
-    // Group by block, then process each block in reverse statement order.
-    // - SingleUse/DeadStore: remove the statement
-    // - DeadCall: convert Assign → ExprStmt (keep the side-effectful expression)
-    let mut actions_by_block: FxHashMap<usize, Vec<(usize, &InlineKind)>> =
-        FxHashMap::default();
-    for candidate in &candidates {
-        actions_by_block
-            .entry(candidate.node_idx.index())
-            .or_default()
-            .push((candidate.stmt_idx, &candidate.kind));
-    }
-
+    // Step 4: Walk all stmts and remove/transform candidates.
     let all_nodes: Vec<_> = func.cfg.node_indices().collect();
     for node_idx in all_nodes {
-        if let Some(actions) = actions_by_block.get(&node_idx.index()) {
-            let mut sorted: Vec<_> = actions.clone();
-            sorted.sort_by(|a, b| b.0.cmp(&a.0)); // reverse order
-            sorted.dedup_by_key(|a| a.0);
+        let stmts = std::mem::take(&mut func.cfg[node_idx].stmts);
+        func.cfg[node_idx].stmts = apply_removals(
+            stmts,
+            func,
+            &single_use,
+            &dead_stores,
+            &dead_calls,
+            &dead_call_extracts,
+        );
+    }
 
-            for (idx, kind) in sorted {
-                if idx < func.cfg[node_idx].stmts.len() {
-                    match kind {
-                        InlineKind::DeadCall => {
-                            // Convert `var = call()` → `call()`
-                            if let HirStmt::Assign { value, .. } = &func.cfg[node_idx].stmts[idx] {
-                                let value = *value;
-                                func.cfg[node_idx].stmts[idx] = HirStmt::ExprStmt(value);
-                            }
-                        }
-                        InlineKind::DeadCallExtract => {
-                            // Extract side-effectful calls from non-statement expressions
-                            if let HirStmt::Assign { value, .. } = &func.cfg[node_idx].stmts[idx] {
-                                let value = *value;
-                                let mut calls = Vec::new();
-                                collect_side_effect_calls(func, value, &mut calls);
-                                if calls.is_empty() {
-                                    // No extractable calls — just remove
-                                    func.cfg[node_idx].stmts.remove(idx);
-                                } else {
-                                    // Replace with first call, insert rest after
-                                    func.cfg[node_idx].stmts[idx] = HirStmt::ExprStmt(calls[0]);
-                                    for (j, &call_expr) in calls[1..].iter().enumerate() {
-                                        func.cfg[node_idx].stmts.insert(idx + 1 + j, HirStmt::ExprStmt(call_expr));
-                                    }
-                                }
-                            }
-                        }
-                        InlineKind::SingleUse | InlineKind::DeadStore => {
-                            func.cfg[node_idx].stmts.remove(idx);
-                        }
+    total
+}
+
+/// Recursively find inline candidates in a statement list.
+fn find_candidates_in_stmts(
+    stmts: &[HirStmt],
+    func: &HirFunc,
+    use_counts: &FxHashMap<VarId, usize>,
+    single_use: &mut FxHashMap<VarId, ExprId>,
+    dead_stores: &mut FxHashSet<VarId>,
+    dead_calls: &mut FxHashSet<VarId>,
+    dead_call_extracts: &mut FxHashSet<VarId>,
+) {
+    for stmt in stmts {
+        // Check this statement for a candidate
+        if let HirStmt::Assign {
+            target: LValue::Local(var_id),
+            value,
+        } = stmt
+        {
+            let info = func.vars.get(*var_id);
+            let has_name = info.name.is_some();
+            let is_closure = matches!(func.exprs.get(*value), HirExpr::Closure { .. });
+            let uses = use_counts.get(var_id).copied().unwrap_or(0);
+
+            // Named variables are generally kept (not inlined), except:
+            // - Closures with exactly 1 use can be inlined at the call site
+            if !(has_name && !(is_closure && uses == 1)) {
+                if uses == 0 {
+                    if !expr_has_side_effects(func, *value) {
+                        dead_stores.insert(*var_id);
+                    } else if is_statement_expr(func, *value) {
+                        dead_calls.insert(*var_id);
+                    } else {
+                        dead_call_extracts.insert(*var_id);
+                    }
+                } else if uses == 1 {
+                    if !(matches!(func.exprs.get(*value), HirExpr::Table { .. })
+                        && is_var_used_as_table_target(func, *var_id))
+                    {
+                        single_use.insert(*var_id, *value);
                     }
                 }
             }
         }
+
+        // Recurse into nested bodies
+        match stmt {
+            HirStmt::If { then_body, elseif_clauses, else_body, .. } => {
+                find_candidates_in_stmts(then_body, func, use_counts, single_use, dead_stores, dead_calls, dead_call_extracts);
+                for clause in elseif_clauses {
+                    find_candidates_in_stmts(&clause.body, func, use_counts, single_use, dead_stores, dead_calls, dead_call_extracts);
+                }
+                if let Some(body) = else_body {
+                    find_candidates_in_stmts(body, func, use_counts, single_use, dead_stores, dead_calls, dead_call_extracts);
+                }
+            }
+            HirStmt::While { body, .. } | HirStmt::Repeat { body, .. }
+            | HirStmt::NumericFor { body, .. } | HirStmt::GenericFor { body, .. } => {
+                find_candidates_in_stmts(body, func, use_counts, single_use, dead_stores, dead_calls, dead_call_extracts);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Recursively walk stmts and remove/transform inlined candidates.
+fn apply_removals(
+    stmts: Vec<HirStmt>,
+    func: &HirFunc,
+    single_use: &FxHashMap<VarId, ExprId>,
+    dead_stores: &FxHashSet<VarId>,
+    dead_calls: &FxHashSet<VarId>,
+    dead_call_extracts: &FxHashSet<VarId>,
+) -> Vec<HirStmt> {
+    let mut result = Vec::with_capacity(stmts.len());
+
+    for stmt in stmts {
+        // Check if this Assign should be removed/transformed
+        if let HirStmt::Assign {
+            target: LValue::Local(var_id),
+            value,
+        } = &stmt
+        {
+            if single_use.contains_key(var_id) || dead_stores.contains(var_id) {
+                continue; // Remove
+            }
+            if dead_calls.contains(var_id) {
+                result.push(HirStmt::ExprStmt(*value));
+                continue;
+            }
+            if dead_call_extracts.contains(var_id) {
+                let mut calls = Vec::new();
+                collect_side_effect_calls(func, *value, &mut calls);
+                if calls.is_empty() {
+                    continue; // Remove
+                }
+                for call_expr in calls {
+                    result.push(HirStmt::ExprStmt(call_expr));
+                }
+                continue;
+            }
+        }
+
+        // Recurse into nested bodies
+        let stmt = match stmt {
+            HirStmt::If { condition, then_body, elseif_clauses, else_body } => {
+                let then_body = apply_removals(then_body, func, single_use, dead_stores, dead_calls, dead_call_extracts);
+                let elseif_clauses = elseif_clauses.into_iter().map(|c| {
+                    lantern_hir::stmt::ElseIfClause {
+                        condition: c.condition,
+                        body: apply_removals(c.body, func, single_use, dead_stores, dead_calls, dead_call_extracts),
+                    }
+                }).collect();
+                let else_body = else_body.map(|b| apply_removals(b, func, single_use, dead_stores, dead_calls, dead_call_extracts));
+                HirStmt::If { condition, then_body, elseif_clauses, else_body }
+            }
+            HirStmt::While { condition, body } => {
+                let body = apply_removals(body, func, single_use, dead_stores, dead_calls, dead_call_extracts);
+                HirStmt::While { condition, body }
+            }
+            HirStmt::Repeat { condition, body } => {
+                let body = apply_removals(body, func, single_use, dead_stores, dead_calls, dead_call_extracts);
+                HirStmt::Repeat { condition, body }
+            }
+            HirStmt::NumericFor { var, start, limit, step, body } => {
+                let body = apply_removals(body, func, single_use, dead_stores, dead_calls, dead_call_extracts);
+                HirStmt::NumericFor { var, start, limit, step, body }
+            }
+            HirStmt::GenericFor { vars, iterators, body } => {
+                let body = apply_removals(body, func, single_use, dead_stores, dead_calls, dead_call_extracts);
+                HirStmt::GenericFor { vars, iterators, body }
+            }
+            other => other,
+        };
+        result.push(stmt);
     }
 
-    inlined
+    result
 }
 
 /// Count how many times each VarId is used as a value (read).
 /// Counts references in:
 /// - All expressions in the arena (Var nodes)
 /// - Statement targets that read vars (compound assign, etc.)
-/// - Terminator conditions
 fn count_uses(func: &HirFunc) -> FxHashMap<VarId, usize> {
     let mut counts: FxHashMap<VarId, usize> = FxHashMap::default();
 
@@ -288,8 +308,6 @@ fn expr_has_side_effects(func: &HirFunc, expr_id: ExprId) -> bool {
 
 /// Check if a variable is used as the table target of a FieldAccess/IndexAccess
 /// (expression side) or Field/Index (LValue side).
-/// If so, inlining a Table constructor into that position would produce invalid syntax
-/// like `{}.field` which is not valid Lua.
 fn is_var_used_as_table_target(func: &HirFunc, var_id: VarId) -> bool {
     // Check expression arena: FieldAccess/IndexAccess table positions
     for i in 0..func.exprs.len() {
@@ -345,7 +363,6 @@ fn lvalue_has_var_table(lv: &LValue, func: &HirFunc, var_id: VarId) -> bool {
 }
 
 /// Check if an expression is valid as a standalone Lua statement.
-/// Only function calls and method calls can be statements in Lua.
 fn is_statement_expr(func: &HirFunc, expr_id: ExprId) -> bool {
     matches!(
         func.exprs.get(expr_id),
@@ -354,7 +371,6 @@ fn is_statement_expr(func: &HirFunc, expr_id: ExprId) -> bool {
 }
 
 /// Recursively collect all Call/MethodCall sub-expressions from an expression tree.
-/// Used to extract side-effectful calls from wrapper expressions like `{ func() }`.
 fn collect_side_effect_calls(func: &HirFunc, expr_id: ExprId, out: &mut Vec<ExprId>) {
     match func.exprs.get(expr_id) {
         HirExpr::Call { .. } | HirExpr::MethodCall { .. } => {
@@ -407,25 +423,4 @@ fn collect_side_effect_calls(func: &HirFunc, expr_id: ExprId, out: &mut Vec<Expr
         }
         _ => {}
     }
-}
-
-struct InlineCandidate {
-    var_id: VarId,
-    value_expr: ExprId,
-    node_idx: petgraph::stable_graph::NodeIndex,
-    stmt_idx: usize,
-    kind: InlineKind,
-}
-
-enum InlineKind {
-    /// Single-use temp: inline expression, remove statement.
-    SingleUse,
-    /// Dead store with no side effects: remove entirely.
-    DeadStore,
-    /// Dead store with side effects that is a valid statement expression:
-    /// convert `var = call()` → `call()`.
-    DeadCall,
-    /// Dead store with side effects wrapped in non-statement expression:
-    /// extract calls as separate ExprStmts.
-    DeadCallExtract,
 }

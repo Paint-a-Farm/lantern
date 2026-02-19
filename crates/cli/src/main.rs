@@ -186,6 +186,7 @@ fn main() {
                 func_timings.record(PHASE_VARS, vars_duration);
 
                 // Expression simplification: collapse multi-return, then inline temps
+                // (before structuring — the structurer inspects body sizes for guard detection)
                 let ((), exprs_duration) = timing::timed(|| {
                     lantern_exprs::collapse_multi_returns(&mut hir);
                     lantern_exprs::eliminate_temporaries(&mut hir);
@@ -201,6 +202,8 @@ fn main() {
                 // Post-structuring patterns: normalize elseif chains, merge conditions
                 let ((), patterns_duration) = timing::timed(|| {
                     lantern_structure::apply_patterns(&mut hir);
+                    // Second inline pass: catch temps inside structured bodies
+                    lantern_exprs::eliminate_temporaries(&mut hir);
                 });
                 func_timings.record(PHASE_PATTERNS, patterns_duration);
             }
