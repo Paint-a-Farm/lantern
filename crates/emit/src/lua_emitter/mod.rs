@@ -46,9 +46,7 @@ pub fn emit_file(funcs: &[HirFunc], child_protos: &[Vec<usize>], main_index: usi
     // Emit it without a function wrapper.
     if main_func.structured {
         let entry = main_func.entry;
-        for stmt in &main_func.cfg[entry].stmts {
-            emitter.emit_stmt(stmt);
-        }
+        emitter.emit_stmts(&main_func.cfg[entry].stmts);
     }
 
     emitter.output
@@ -98,17 +96,13 @@ impl<'a> LuaEmitter<'a> {
         if self.func.structured {
             let entry = self.func.entry;
             let stmts = &self.func.cfg[entry].stmts;
-            for (i, stmt) in stmts.iter().enumerate() {
-                // Skip trailing bare return (implicit in Lua)
-                if i == stmts.len() - 1 {
-                    if let HirStmt::Return(values) = stmt {
-                        if values.is_empty() {
-                            continue;
-                        }
-                    }
-                }
-                self.emit_stmt(stmt);
-            }
+            // Strip trailing bare return (implicit in Lua)
+            let stmts = if let Some(HirStmt::Return(values)) = stmts.last() {
+                if values.is_empty() { &stmts[..stmts.len() - 1] } else { stmts }
+            } else {
+                stmts
+            };
+            self.emit_stmts(stmts);
         } else {
             self.emit_unstructured();
         }

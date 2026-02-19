@@ -13,6 +13,14 @@ use super::precedence::binop_str;
 use super::LuaEmitter;
 
 impl<'a> LuaEmitter<'a> {
+    /// Emit a sequence of statements, providing look-ahead context
+    /// for variable hoisting across control flow boundaries.
+    pub(super) fn emit_stmts(&mut self, stmts: &[HirStmt]) {
+        for (i, stmt) in stmts.iter().enumerate() {
+            self.emit_stmt_with_following(stmt, &stmts[i + 1..]);
+        }
+    }
+
     pub(super) fn emit_unstructured(&mut self) {
         // Collect blocks sorted by PC start
         let mut blocks: Vec<_> = self
@@ -41,6 +49,10 @@ impl<'a> LuaEmitter<'a> {
     }
 
     pub(super) fn emit_stmt(&mut self, stmt: &HirStmt) {
+        self.emit_stmt_with_following(stmt, &[]);
+    }
+
+    fn emit_stmt_with_following(&mut self, stmt: &HirStmt, following: &[HirStmt]) {
         match stmt {
             HirStmt::LocalDecl { var, init } => {
                 self.write_indent();
@@ -164,16 +176,14 @@ impl<'a> LuaEmitter<'a> {
             } => {
                 // Hoist local declarations for variables that are first-assigned
                 // inside one branch but used in another branch or after the if.
-                self.hoist_branch_locals(then_body, elseif_clauses, else_body.as_deref());
+                self.hoist_branch_locals(then_body, elseif_clauses, else_body.as_deref(), following);
 
                 self.write_indent();
                 self.output.push_str("if ");
                 self.emit_expr(*condition);
                 self.output.push_str(" then\n");
                 self.indent += 1;
-                for s in then_body {
-                    self.emit_stmt(s);
-                }
+                self.emit_stmts(then_body);
                 self.indent -= 1;
                 for clause in elseif_clauses {
                     self.emit_elseif(clause);
@@ -182,9 +192,7 @@ impl<'a> LuaEmitter<'a> {
                     self.write_indent();
                     self.output.push_str("else\n");
                     self.indent += 1;
-                    for s in else_stmts {
-                        self.emit_stmt(s);
-                    }
+                    self.emit_stmts(else_stmts);
                     self.indent -= 1;
                 }
                 self.write_indent();
@@ -197,9 +205,7 @@ impl<'a> LuaEmitter<'a> {
                 self.emit_expr(*condition);
                 self.output.push_str(" do\n");
                 self.indent += 1;
-                for s in body {
-                    self.emit_stmt(s);
-                }
+                self.emit_stmts(body);
                 self.indent -= 1;
                 self.write_indent();
                 self.output.push_str("end\n");
@@ -209,9 +215,7 @@ impl<'a> LuaEmitter<'a> {
                 self.write_indent();
                 self.output.push_str("repeat\n");
                 self.indent += 1;
-                for s in body {
-                    self.emit_stmt(s);
-                }
+                self.emit_stmts(body);
                 self.indent -= 1;
                 self.write_indent();
                 self.output.push_str("until ");
@@ -239,9 +243,7 @@ impl<'a> LuaEmitter<'a> {
                 }
                 self.output.push_str(" do\n");
                 self.indent += 1;
-                for s in body {
-                    self.emit_stmt(s);
-                }
+                self.emit_stmts(body);
                 self.indent -= 1;
                 self.write_indent();
                 self.output.push_str("end\n");
@@ -265,9 +267,7 @@ impl<'a> LuaEmitter<'a> {
                 }
                 self.output.push_str(" do\n");
                 self.indent += 1;
-                for s in body {
-                    self.emit_stmt(s);
-                }
+                self.emit_stmts(body);
                 self.indent -= 1;
                 self.write_indent();
                 self.output.push_str("end\n");
@@ -392,9 +392,7 @@ impl<'a> LuaEmitter<'a> {
         self.emit_expr(clause.condition);
         self.output.push_str(" then\n");
         self.indent += 1;
-        for s in &clause.body {
-            self.emit_stmt(s);
-        }
+        self.emit_stmts(&clause.body);
         self.indent -= 1;
     }
 
