@@ -64,9 +64,9 @@ fn inline_pass(func: &mut HirFunc) -> usize {
                             stmt_idx,
                             kind: InlineKind::DeadStore,
                         });
-                    } else {
-                        // Dead store with side effects (e.g., unused call result)
-                        // Convert: `_v = func()` → `func()`
+                    } else if is_statement_expr(func, *value) {
+                        // Dead store with side effects and value is a valid statement
+                        // expression (Call/MethodCall). Convert: `_v = func()` → `func()`
                         candidates.push(InlineCandidate {
                             var_id: *var_id,
                             value_expr: *value,
@@ -74,16 +74,27 @@ fn inline_pass(func: &mut HirFunc) -> usize {
                             stmt_idx,
                             kind: InlineKind::DeadCall,
                         });
+                    } else {
+                        // Dead store with side effects wrapped in a non-statement expr
+                        // (e.g., `_v = { func() }` or `_v = a or b()`).
+                        // Extract the side-effectful calls as separate ExprStmts.
+                        candidates.push(InlineCandidate {
+                            var_id: *var_id,
+                            value_expr: *value,
+                            node_idx,
+                            stmt_idx,
+                            kind: InlineKind::DeadCallExtract,
+                        });
                     }
                 } else if uses == 1 {
-                    // Single-use temporary — inline the expression
-                    // Safety check: the expression must be safe to move
-                    // (no side effects that would be reordered).
-                    // For now, we inline everything except calls with side effects
-                    // when there are intervening side effects.
-                    // Simple heuristic: always inline single-use temps.
-                    // This is safe because the Luau compiler generates temporaries
-                    // in strict evaluation order.
+                    // Single-use temporary — inline the expression.
+                    // Table constructors can't be used as field/index access targets
+                    // in Lua syntax (e.g., `{}.field` is invalid).
+                    if matches!(func.exprs.get(*value), HirExpr::Table { .. })
+                        && is_var_used_as_table_target(func, *var_id)
+                    {
+                        continue;
+                    }
                     candidates.push(InlineCandidate {
                         var_id: *var_id,
                         value_expr: *value,
@@ -148,6 +159,24 @@ fn inline_pass(func: &mut HirFunc) -> usize {
                             if let HirStmt::Assign { value, .. } = &func.cfg[node_idx].stmts[idx] {
                                 let value = *value;
                                 func.cfg[node_idx].stmts[idx] = HirStmt::ExprStmt(value);
+                            }
+                        }
+                        InlineKind::DeadCallExtract => {
+                            // Extract side-effectful calls from non-statement expressions
+                            if let HirStmt::Assign { value, .. } = &func.cfg[node_idx].stmts[idx] {
+                                let value = *value;
+                                let mut calls = Vec::new();
+                                collect_side_effect_calls(func, value, &mut calls);
+                                if calls.is_empty() {
+                                    // No extractable calls — just remove
+                                    func.cfg[node_idx].stmts.remove(idx);
+                                } else {
+                                    // Replace with first call, insert rest after
+                                    func.cfg[node_idx].stmts[idx] = HirStmt::ExprStmt(calls[0]);
+                                    for (j, &call_expr) in calls[1..].iter().enumerate() {
+                                        func.cfg[node_idx].stmts.insert(idx + 1 + j, HirStmt::ExprStmt(call_expr));
+                                    }
+                                }
                             }
                         }
                         InlineKind::SingleUse | InlineKind::DeadStore => {
@@ -252,6 +281,129 @@ fn expr_has_side_effects(func: &HirFunc, expr_id: ExprId) -> bool {
     }
 }
 
+/// Check if a variable is used as the table target of a FieldAccess/IndexAccess
+/// (expression side) or Field/Index (LValue side).
+/// If so, inlining a Table constructor into that position would produce invalid syntax
+/// like `{}.field` which is not valid Lua.
+fn is_var_used_as_table_target(func: &HirFunc, var_id: VarId) -> bool {
+    // Check expression arena: FieldAccess/IndexAccess table positions
+    for i in 0..func.exprs.len() {
+        let expr_id = ExprId(i as u32);
+        match func.exprs.get(expr_id) {
+            HirExpr::FieldAccess { table, .. } | HirExpr::IndexAccess { table, .. } => {
+                if matches!(func.exprs.get(*table), HirExpr::Var(v) if *v == var_id) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    // Check LValues in statements: Field/Index table positions
+    for node_idx in func.cfg.node_indices() {
+        for stmt in &func.cfg[node_idx].stmts {
+            if lvalue_uses_var_as_table(stmt, func, var_id) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn lvalue_uses_var_as_table(stmt: &HirStmt, func: &HirFunc, var_id: VarId) -> bool {
+    match stmt {
+        HirStmt::Assign { target, .. } | HirStmt::CompoundAssign { target, .. } => {
+            lvalue_has_var_table(target, func, var_id)
+        }
+        HirStmt::MultiAssign { targets, .. } => {
+            targets.iter().any(|t| lvalue_has_var_table(t, func, var_id))
+        }
+        HirStmt::If { then_body, elseif_clauses, else_body, .. } => {
+            then_body.iter().any(|s| lvalue_uses_var_as_table(s, func, var_id))
+                || elseif_clauses.iter().any(|c| c.body.iter().any(|s| lvalue_uses_var_as_table(s, func, var_id)))
+                || else_body.as_ref().is_some_and(|b| b.iter().any(|s| lvalue_uses_var_as_table(s, func, var_id)))
+        }
+        HirStmt::While { body, .. } | HirStmt::Repeat { body, .. }
+        | HirStmt::NumericFor { body, .. } | HirStmt::GenericFor { body, .. } => {
+            body.iter().any(|s| lvalue_uses_var_as_table(s, func, var_id))
+        }
+        _ => false,
+    }
+}
+
+fn lvalue_has_var_table(lv: &LValue, func: &HirFunc, var_id: VarId) -> bool {
+    match lv {
+        LValue::Field { table, .. } | LValue::Index { table, .. } => {
+            matches!(func.exprs.get(*table), HirExpr::Var(v) if *v == var_id)
+        }
+        _ => false,
+    }
+}
+
+/// Check if an expression is valid as a standalone Lua statement.
+/// Only function calls and method calls can be statements in Lua.
+fn is_statement_expr(func: &HirFunc, expr_id: ExprId) -> bool {
+    matches!(
+        func.exprs.get(expr_id),
+        HirExpr::Call { .. } | HirExpr::MethodCall { .. }
+    )
+}
+
+/// Recursively collect all Call/MethodCall sub-expressions from an expression tree.
+/// Used to extract side-effectful calls from wrapper expressions like `{ func() }`.
+fn collect_side_effect_calls(func: &HirFunc, expr_id: ExprId, out: &mut Vec<ExprId>) {
+    match func.exprs.get(expr_id) {
+        HirExpr::Call { .. } | HirExpr::MethodCall { .. } => {
+            out.push(expr_id);
+        }
+        HirExpr::Table { array, hash } => {
+            let array = array.clone();
+            let hash = hash.clone();
+            for item in &array {
+                collect_side_effect_calls(func, *item, out);
+            }
+            for (k, v) in &hash {
+                collect_side_effect_calls(func, *k, out);
+                collect_side_effect_calls(func, *v, out);
+            }
+        }
+        HirExpr::Binary { left, right, .. } => {
+            let (left, right) = (*left, *right);
+            collect_side_effect_calls(func, left, out);
+            collect_side_effect_calls(func, right, out);
+        }
+        HirExpr::Unary { operand, .. } => {
+            let operand = *operand;
+            collect_side_effect_calls(func, operand, out);
+        }
+        HirExpr::Concat(operands) => {
+            let operands = operands.clone();
+            for op in &operands {
+                collect_side_effect_calls(func, *op, out);
+            }
+        }
+        HirExpr::IfExpr { condition, then_expr, else_expr } => {
+            let (c, t, e) = (*condition, *then_expr, *else_expr);
+            collect_side_effect_calls(func, c, out);
+            collect_side_effect_calls(func, t, out);
+            collect_side_effect_calls(func, e, out);
+        }
+        HirExpr::Select { source, .. } => {
+            let source = *source;
+            collect_side_effect_calls(func, source, out);
+        }
+        HirExpr::FieldAccess { table, .. } => {
+            let table = *table;
+            collect_side_effect_calls(func, table, out);
+        }
+        HirExpr::IndexAccess { table, key } => {
+            let (table, key) = (*table, *key);
+            collect_side_effect_calls(func, table, out);
+            collect_side_effect_calls(func, key, out);
+        }
+        _ => {}
+    }
+}
+
 struct InlineCandidate {
     var_id: VarId,
     value_expr: ExprId,
@@ -265,7 +417,10 @@ enum InlineKind {
     SingleUse,
     /// Dead store with no side effects: remove entirely.
     DeadStore,
-    /// Dead store with side effects (e.g., unused call result):
+    /// Dead store with side effects that is a valid statement expression:
     /// convert `var = call()` → `call()`.
     DeadCall,
+    /// Dead store with side effects wrapped in non-statement expression:
+    /// extract calls as separate ExprStmts.
+    DeadCallExtract,
 }

@@ -979,13 +979,15 @@ impl<'a> Lifter<'a> {
     /// with the MULTRET expression itself as the final argument.
     fn collect_multret_args(&mut self, from_reg: u8, pc: usize) -> Vec<ExprId> {
         let mut args = Vec::new();
-        if let Some((top_expr, top_reg)) = self.top.take() {
-            // Collect fixed registers between from_reg and top_reg
-            for r in from_reg..top_reg {
+        if let Some((_top_expr, top_reg)) = self.top.take() {
+            // Collect fixed registers between from_reg and top_reg (inclusive).
+            // We include top_reg itself as a Reg reference instead of using
+            // the raw ExprId so that variable recovery properly tracks def→use
+            // chains. Using top_expr directly would create a second reference
+            // to the same call expression, causing duplicate statements.
+            for r in from_reg..=top_reg {
                 args.push(self.alloc_expr(HirExpr::Reg(self.reg_ref(r, pc)), pc));
             }
-            // The MULTRET expression is the last argument
-            args.push(top_expr);
         }
         args
     }

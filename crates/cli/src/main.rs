@@ -14,6 +14,7 @@ fn main() {
     let mut emit_func: Option<usize> = None;
     let mut file_mode = false;
     let mut raw_mode = false;
+    let mut no_format = false;
     let mut paths = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -24,6 +25,8 @@ fn main() {
             file_mode = true;
         } else if args[i] == "--raw" {
             raw_mode = true;
+        } else if args[i] == "--no-format" {
+            no_format = true;
         } else {
             paths.push(args[i].clone());
         }
@@ -176,9 +179,14 @@ fn main() {
                 lantern_emit::emit_file(&funcs, &child_protos, chunk.main)
             });
 
-            print!("{}", lua_source);
+            let (output, format_duration) = if no_format {
+                (lua_source, std::time::Duration::ZERO)
+            } else {
+                timing::timed(|| format_luau(&lua_source, path))
+            };
+            print!("{}", output);
             if verbose {
-                eprintln!("-- file emit: {:.2?} --", emit_duration);
+                eprintln!("-- file emit: {:.2?}, format: {:.2?} --", emit_duration, format_duration);
             }
         } else if verbose && emit_func.is_none() {
             println!(
@@ -194,6 +202,18 @@ fn main() {
 
     if report.total_functions() > 10 {
         report.print_slowest(15);
+    }
+}
+
+fn format_luau(code: &str, path: &str) -> String {
+    let mut config = stylua_lib::Config::new();
+    config.syntax = stylua_lib::LuaVersion::Luau;
+    match stylua_lib::format_code(code, config, None, stylua_lib::OutputVerification::None) {
+        Ok(formatted) => formatted,
+        Err(e) => {
+            eprintln!("stylua format error in {}: {}", path, e);
+            code.to_string()
+        }
     }
 }
 

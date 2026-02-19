@@ -18,3 +18,4 @@ lantern-exprs = { path = "../exprs" }
 lantern-emit = { path = "../emit" }
 clap = { workspace = true }
 anyhow = { workspace = true }
+stylua = { workspace = true }

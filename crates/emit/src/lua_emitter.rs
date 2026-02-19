@@ -503,7 +503,10 @@ impl<'a> LuaEmitter<'a> {
                     child_func.vars.get(*p).name.as_deref() == Some("self")
                 });
                 let separator = if has_self { ":" } else { "." };
-                let table_str = self.expr_to_string(*table);
+                let table_str = match self.expr_to_string(*table) {
+                    Some(s) => s,
+                    None => return false, // Can't form valid qualified name
+                };
                 (format!("{}{}{}", table_str, separator, field), "")
             }
             LValue::Global(name) => {
@@ -656,7 +659,15 @@ impl<'a> LuaEmitter<'a> {
             }
 
             HirExpr::FieldAccess { table, field } => {
-                self.emit_expr_parens(*table, Precedence::POSTFIX);
+                // Literals need parens: ("str").field, not "str".field
+                let needs_parens = matches!(self.func.exprs.get(*table), HirExpr::Literal(_));
+                if needs_parens {
+                    self.output.push('(');
+                    self.emit_expr(*table);
+                    self.output.push(')');
+                } else {
+                    self.emit_expr_parens(*table, Precedence::POSTFIX);
+                }
                 self.output.push('.');
                 self.output.push_str(field);
             }
@@ -712,7 +723,15 @@ impl<'a> LuaEmitter<'a> {
                 args,
                 ..
             } => {
-                self.emit_expr_parens(*object, Precedence::POSTFIX);
+                // Literals need explicit parens as method receivers: ("str"):method()
+                let needs_parens = matches!(self.func.exprs.get(*object), HirExpr::Literal(_));
+                if needs_parens {
+                    self.output.push('(');
+                    self.emit_expr(*object);
+                    self.output.push(')');
+                } else {
+                    self.emit_expr_parens(*object, Precedence::POSTFIX);
+                }
                 self.output.push(':');
                 self.output.push_str(method);
                 self.output.push('(');
@@ -937,22 +956,34 @@ impl<'a> LuaEmitter<'a> {
     }
 
     /// Convert an expression to a string (for building qualified names).
-    fn expr_to_string(&self, expr_id: ExprId) -> String {
+    fn expr_to_string(&self, expr_id: ExprId) -> Option<String> {
         let expr = self.func.exprs.get(expr_id);
         match expr {
-            HirExpr::Global(name) => name.clone(),
-            HirExpr::Var(var_id) => self.var_name(*var_id),
+            HirExpr::Global(name) => Some(name.clone()),
+            HirExpr::Var(var_id) => Some(self.var_name(*var_id)),
             HirExpr::FieldAccess { table, field } => {
-                format!("{}.{}", self.expr_to_string(*table), field)
+                Some(format!("{}.{}", self.expr_to_string(*table)?, field))
+            }
+            HirExpr::IndexAccess { table, key } => {
+                Some(format!("{}[{}]", self.expr_to_string(*table)?, self.expr_to_string(*key)?))
             }
             HirExpr::Upvalue(slot) => {
                 if let Some(Some(name)) = self.func.upvalue_names.get(*slot as usize) {
-                    name.clone()
+                    Some(name.clone())
                 } else {
-                    format!("upval_{}", slot)
+                    Some(format!("upval_{}", slot))
                 }
             }
-            _ => String::from("?"),
+            HirExpr::Literal(lit) => {
+                match lit {
+                    LuaValue::String(s) => Some(format!("\"{}\"", String::from_utf8_lossy(s))),
+                    LuaValue::Number(n) => Some(format!("{}", n)),
+                    LuaValue::Boolean(b) => Some(format!("{}", b)),
+                    LuaValue::Nil => Some("nil".to_string()),
+                    _ => None,
+                }
+            }
+            _ => None,
         }
     }
 
