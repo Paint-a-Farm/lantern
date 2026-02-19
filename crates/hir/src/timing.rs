@@ -110,9 +110,9 @@ impl PipelineReport {
         let func_count = self.total_functions();
         let file_count = self.files.len();
 
-        println!("\n--- Performance Summary ---");
-        println!("{} files, {} functions in {:.2?}", file_count, func_count, grand);
-        println!();
+        eprintln!("\n--- Performance Summary ---");
+        eprintln!("{} files, {} functions in {:.2?}", file_count, func_count, grand);
+        eprintln!();
 
         // Print phases in pipeline order
         let phase_order = [
@@ -126,13 +126,13 @@ impl PipelineReport {
                 } else {
                     0.0
                 };
-                println!("  {:12} {:>10.2?}  ({:.1}%)", phase, dur, pct);
+                eprintln!("  {:12} {:>10.2?}  ({:.1}%)", phase, dur, pct);
             }
         }
 
         if func_count > 0 {
             let avg = grand / func_count as u32;
-            println!("\n  avg/function: {:.2?}", avg);
+            eprintln!("\n  avg/function: {:.2?}", avg);
         }
     }
 
@@ -144,15 +144,15 @@ impl PipelineReport {
 
         all_funcs.sort_by(|a, b| b.1.total().cmp(&a.1.total()));
 
-        println!("\n--- Slowest {} Functions ---", n);
+        eprintln!("\n--- Slowest {} Functions ---", n);
         for (file, func) in all_funcs.into_iter().take(n) {
             let short_file = file.rsplit('/').next().unwrap_or(file);
-            print!("  {:.2?}  {}::{}", func.total(), short_file, func.func_name);
+            eprint!("  {:.2?}  {}::{}", func.total(), short_file, func.func_name);
             // Show phase breakdown
             let parts: Vec<String> = func.phases.iter()
                 .map(|(p, d)| format!("{}={:.2?}", p, d))
                 .collect();
-            println!("  [{}]", parts.join(", "));
+            eprintln!("  [{}]", parts.join(", "));
         }
     }
 }

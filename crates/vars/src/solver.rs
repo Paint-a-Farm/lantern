@@ -86,13 +86,16 @@ pub fn recover_variables(func: &mut HirFunc, scopes: &ScopeTree, num_params: u8)
                 continue; // Already bound (e.g., parameter)
             }
 
-            // For defs, also try pc+1: the bytecode compiler starts the scope
-            // at the instruction AFTER the defining instruction (e.g., CALL at pc 4
-            // defines x, but x's scope starts at pc 5).
+            // For defs, the bytecode compiler starts the scope at the
+            // instruction AFTER the defining instruction. Try pc+1 first.
+            // For AUX-word instructions (NewTable, GetImport, etc.) that
+            // occupy 2 slots, the scope may start at pc+2 — but only if
+            // a scope actually STARTS there (not just contains it).
             let scope = find_scope(scopes, register, access.reg.pc)
                 .or_else(|| {
                     if access.is_def {
                         find_scope(scopes, register, access.reg.pc + 1)
+                            .or_else(|| find_scope_starting_at(scopes, register, access.reg.pc + 2))
                     } else {
                         None
                     }
@@ -198,6 +201,19 @@ fn find_scope(scopes: &ScopeTree, register: u8, pc: usize) -> Option<(&str, usiz
         }
     }
     best.map(|(name, start, _)| (name, start))
+}
+
+/// Find a scope for a register that STARTS at exactly the given PC.
+/// Unlike find_scope (which finds any enclosing scope), this only matches
+/// scopes whose start boundary is at the specified PC. Used for AUX-word
+/// instructions where the scope starts 2 PCs after the def.
+fn find_scope_starting_at(scopes: &ScopeTree, register: u8, pc: usize) -> Option<(&str, usize)> {
+    for scope in scopes.scopes_for_register(register) {
+        if scope.pc_range.start == pc {
+            return Some((&scope.name, scope.pc_range.start));
+        }
+    }
+    None
 }
 
 /// Rewrite all RegRef in the HIR to VarId using the resolved mappings.

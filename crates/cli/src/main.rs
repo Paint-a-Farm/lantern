@@ -122,9 +122,12 @@ fn main() {
                         }
                         _ => None,
                     };
-                    println!("  {:4}  {:?}\tA={} B={} C={} D={} E={}{}",
+                    let aux_str = if insn.op.has_aux() {
+                        format!(" aux=0x{:08X}", insn.aux)
+                    } else { String::new() };
+                    println!("  {:4}  {:?}\tA={} B={} C={} D={} E={}{}{}",
                         pc, insn.op, insn.a, insn.b, insn.c, insn.d, insn.e,
-                        const_str.unwrap_or_default());
+                        aux_str, const_str.unwrap_or_default());
                 }
                 println!();
             }

@@ -97,7 +97,7 @@ pub fn discover_block_starts(
             // Generic for loop: back-edge (has AUX)
             OpCode::ForGLoop => {
                 let target = ((pc + 1) as i64 + insn.d as i64) as usize;
-                starts.insert(pc + 1); // after loop exit (past AUX word)
+                starts.insert(pc + 2); // after loop exit (skip AUX word)
                 starts.insert(target); // loop body start
             }
 

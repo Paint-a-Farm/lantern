@@ -1211,6 +1211,25 @@ impl<'a> Lifter<'a> {
 
             // Check if this is a conditional jump inside the boolean region
             if let Some(cond_expr) = self.lift_bool_condition(insn, scan_pc) {
+                // For JumpXEqK* in AND chains, bail-out jumps (target==end_pc)
+                // need the condition negated. Unlike JumpIfEq/JumpIfNotEq which
+                // encode direction in the opcode, JumpXEqK* uses the same form
+                // for both chain types — we disambiguate via jump target.
+                let cond_expr = if matches!(insn.op,
+                    OpCode::JumpXEqKNil | OpCode::JumpXEqKB |
+                    OpCode::JumpXEqKN | OpCode::JumpXEqKS)
+                {
+                    let target = ((scan_pc + 1) as i64 + insn.d as i64) as usize;
+                    if target == end_pc && is_or_chain == Some(false) {
+                        // AND chain bail-out: source condition is the negation
+                        // of the jump test. Flip Eq↔Ne.
+                        self.negate_comparison(cond_expr, scan_pc)
+                    } else {
+                        cond_expr
+                    }
+                } else {
+                    cond_expr
+                };
                 conditions.push(cond_expr);
                 // Advance past AUX word if needed
                 scan_pc += if crate::bool_regions::has_aux_word(insn.op) { 2 } else { 1 };
@@ -1633,4 +1652,23 @@ impl<'a> Lifter<'a> {
         }
     }
 
+    /// Negate a comparison expression (flip Eq↔Ne, Lt↔Ge, Le↔Gt).
+    /// Used when a JumpXEqK* bail-out jump in an AND chain needs inversion.
+    fn negate_comparison(&mut self, expr_id: ExprId, pc: usize) -> ExprId {
+        let expr = self.hir.exprs.get(expr_id).clone();
+        if let HirExpr::Binary { op, left, right } = expr {
+            let negated_op = match op {
+                BinOp::CompareEq => BinOp::CompareNe,
+                BinOp::CompareNe => BinOp::CompareEq,
+                BinOp::CompareLt => BinOp::CompareGe,
+                BinOp::CompareLe => BinOp::CompareGt,
+                BinOp::CompareGe => BinOp::CompareLt,
+                BinOp::CompareGt => BinOp::CompareLe,
+                _ => return expr_id, // non-comparison, don't negate
+            };
+            self.alloc_expr(HirExpr::Binary { op: negated_op, left, right }, pc)
+        } else {
+            expr_id
+        }
+    }
 }
