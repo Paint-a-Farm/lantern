@@ -197,6 +197,8 @@ fn main() {
                 let ((), exprs_duration) = timing::timed(|| {
                     lantern_exprs::collapse_multi_returns(&mut hir);
                     lantern_exprs::eliminate_temporaries(&mut hir);
+                    lantern_exprs::fold_table_constructors(&mut hir);
+                    lantern_exprs::eliminate_temporaries(&mut hir);
                 });
                 func_timings.record(PHASE_EXPRS, exprs_duration);
 
@@ -220,6 +222,8 @@ fn main() {
                 let ((), patterns_duration) = timing::timed(|| {
                     lantern_structure::apply_patterns(&mut hir);
                     // Second inline pass: catch temps inside structured bodies
+                    lantern_exprs::eliminate_temporaries(&mut hir);
+                    lantern_exprs::fold_table_constructors(&mut hir);
                     lantern_exprs::eliminate_temporaries(&mut hir);
                 });
                 func_timings.record(PHASE_PATTERNS, patterns_duration);
