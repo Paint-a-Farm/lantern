@@ -13,10 +13,46 @@ use lantern_hir::var::VarId;
 
 use rustc_hash::FxHashSet;
 
-/// Emit a function to Lua source text.
+use crate::type_info;
+
+/// Context for whole-file emission.
+/// Maps child proto indices to their lifted HirFuncs.
+pub struct FileContext<'a> {
+    /// All HirFuncs in the chunk, indexed by bytecode function index.
+    pub funcs: &'a [HirFunc],
+    /// For each bytecode function, its child_protos table.
+    /// child_protos[func_index][local_proto_id] = global bytecode func index.
+    pub child_protos: &'a [Vec<usize>],
+}
+
+/// Emit a single function to Lua source text including signature.
 pub fn emit_function(func: &HirFunc) -> String {
-    let mut emitter = LuaEmitter::new(func);
-    emitter.emit();
+    let mut emitter = LuaEmitter::new(func, None);
+    emitter.emit_with_signature();
+    emitter.output
+}
+
+/// Emit a whole file: the main function's body as top-level statements,
+/// with closures emitted inline and `X.Y = function(self, ...)` converted
+/// to `function X:Y(...)`.
+pub fn emit_file(funcs: &[HirFunc], child_protos: &[Vec<usize>], main_index: usize) -> String {
+    let ctx = FileContext {
+        funcs,
+        child_protos,
+    };
+
+    let main_func = &funcs[main_index];
+    let mut emitter = LuaEmitter::new(main_func, Some(&ctx));
+
+    // The main function's body IS the top-level code.
+    // Emit it without a function wrapper.
+    if main_func.structured {
+        let entry = main_func.entry;
+        for stmt in &main_func.cfg[entry].stmts {
+            emitter.emit_stmt(stmt);
+        }
+    }
+
     emitter.output
 }
 
@@ -27,10 +63,12 @@ pub struct LuaEmitter<'a> {
     /// Track which local variables have been declared (emitted with `local`).
     /// Pre-populated with parameters and for-loop variables.
     declared: FxHashSet<VarId>,
+    /// File context for resolving closures to child HirFuncs.
+    file_ctx: Option<&'a FileContext<'a>>,
 }
 
 impl<'a> LuaEmitter<'a> {
-    pub fn new(func: &'a HirFunc) -> Self {
+    pub fn new(func: &'a HirFunc, file_ctx: Option<&'a FileContext<'a>>) -> Self {
         // Pre-declare parameters and loop variables
         let mut declared = FxHashSet::default();
         for (var_id, info) in func.vars.iter() {
@@ -44,12 +82,22 @@ impl<'a> LuaEmitter<'a> {
             output: String::new(),
             indent: 0,
             declared,
+            file_ctx,
         }
     }
 
-    pub fn emit(&mut self) {
+    /// Emit the full function definition including signature and `end`.
+    pub fn emit_with_signature(&mut self) {
+        self.emit_signature(None);
+        self.indent += 1;
+        self.emit_body();
+        self.indent -= 1;
+        self.output.push_str("end\n");
+    }
+
+    /// Emit just the function body (no signature/end wrapper).
+    pub fn emit_body(&mut self) {
         if self.func.structured {
-            // Structured mode: walk only the entry block's nested statement tree
             let entry = self.func.entry;
             for stmt in &self.func.cfg[entry].stmts {
                 self.emit_stmt(stmt);
@@ -57,6 +105,62 @@ impl<'a> LuaEmitter<'a> {
         } else {
             self.emit_unstructured();
         }
+    }
+
+    /// Emit the function signature.
+    ///
+    /// If `qualified_name` is provided, it overrides the function's debug name
+    /// (used for `function ClassName:methodName(...)` emission).
+    fn emit_signature(&mut self, qualified_name: Option<&str>) {
+        let type_info = type_info::decode_param_types(&self.func.type_info);
+
+        // Check if first param is "self" — if so, this is a method
+        let has_self = self.func.params.first().map_or(false, |p| {
+            self.func.vars.get(*p).name.as_deref() == Some("self")
+        });
+
+        self.output.push_str("function");
+
+        // Function name
+        let name = qualified_name.map(|s| s.to_string()).or_else(|| self.func.name.clone());
+        if let Some(name) = &name {
+            self.output.push(' ');
+            self.output.push_str(name);
+        }
+
+        self.output.push('(');
+
+        // Parameters: skip "self" for method notation (it's implicit with `:`)
+        let param_start = if has_self { 1 } else { 0 };
+        let params = &self.func.params[param_start..];
+
+        for (i, var_id) in params.iter().enumerate() {
+            if i > 0 {
+                self.output.push_str(", ");
+            }
+
+            let name = self.var_name(*var_id);
+            self.output.push_str(&name);
+
+            // Type annotation from type_info (offset by param_start since we may skip self)
+            if let Some(ref ti) = type_info {
+                let type_index = param_start + i;
+                if let Some(type_str) = ti.param_types.get(type_index) {
+                    if !type_str.is_empty() {
+                        let _ = write!(self.output, ": {}", type_str);
+                    }
+                }
+            }
+        }
+
+        if self.func.is_vararg {
+            if !params.is_empty() {
+                self.output.push_str(", ");
+            }
+            self.output.push_str("...");
+        }
+
+        self.output.push_str(")\n");
     }
 
     fn emit_unstructured(&mut self) {
@@ -125,6 +229,13 @@ impl<'a> LuaEmitter<'a> {
             }
 
             HirStmt::Assign { target, value } => {
+                // Check if this is a function definition pattern:
+                // X.Y = function(self, ...) → function X:Y(...)
+                // X.Y = function(...)       → function X.Y(...)
+                if self.try_emit_func_def(target, *value) {
+                    return;
+                }
+
                 self.write_indent();
                 if let LValue::Local(var_id) = target {
                     if self.declared.insert(*var_id) {
@@ -351,6 +462,78 @@ impl<'a> LuaEmitter<'a> {
         }
     }
 
+    /// Try to emit `target = closure` as a function definition.
+    ///
+    /// Detects patterns like:
+    ///   `X.Y = function(self, ...)` → `function X:Y(...)`
+    ///   `X.Y = function(...)` → `function X.Y(...)`
+    ///
+    /// Returns true if the statement was handled as a function definition.
+    fn try_emit_func_def(&mut self, target: &LValue, value: ExprId) -> bool {
+        let ctx = match self.file_ctx {
+            Some(ctx) => ctx,
+            None => return false,
+        };
+
+        // Check if value is a Closure expression
+        let (proto_id, _captures) = match self.func.exprs.get(value) {
+            HirExpr::Closure { proto_id, captures } => (*proto_id, captures.clone()),
+            _ => return false,
+        };
+
+        // Resolve proto_id to bytecode function index, then to HirFunc
+        let child_protos = match ctx.child_protos.get(self.func.proto_index) {
+            Some(cp) => cp,
+            None => return false,
+        };
+        let bc_func_idx = match child_protos.get(proto_id) {
+            Some(&idx) => idx,
+            None => return false,
+        };
+        let child_func = match ctx.funcs.get(bc_func_idx) {
+            Some(f) => f,
+            None => return false,
+        };
+
+        // Build the qualified name and prefix from the assignment target
+        let (qualified_name, prefix) = match target {
+            LValue::Field { table, field } => {
+                // Check if child's first param is "self"
+                let has_self = child_func.params.first().map_or(false, |p| {
+                    child_func.vars.get(*p).name.as_deref() == Some("self")
+                });
+                let separator = if has_self { ":" } else { "." };
+                let table_str = self.expr_to_string(*table);
+                (format!("{}{}{}", table_str, separator, field), "")
+            }
+            LValue::Global(name) => {
+                (name.clone(), "")
+            }
+            LValue::Local(var_id) => {
+                let name = self.var_name(*var_id);
+                let is_new = self.declared.insert(*var_id);
+                let prefix = if is_new { "local " } else { "" };
+                (name, prefix)
+            }
+            _ => return false,
+        };
+
+        // Emit as function definition
+        self.write_indent();
+        self.output.push_str(prefix);
+        let mut child_emitter = LuaEmitter::new(child_func, self.file_ctx);
+        child_emitter.indent = self.indent;
+        child_emitter.emit_signature(Some(&qualified_name));
+        child_emitter.indent += 1;
+        child_emitter.emit_body();
+        child_emitter.indent -= 1;
+        child_emitter.write_indent();
+        child_emitter.output.push_str("end\n");
+        self.output.push_str(&child_emitter.output);
+
+        true
+    }
+
     fn emit_elseif(&mut self, clause: &ElseIfClause) {
         self.write_indent();
         self.output.push_str("elseif ");
@@ -543,8 +726,31 @@ impl<'a> LuaEmitter<'a> {
             }
 
             HirExpr::Closure { proto_id, .. } => {
-                // In unstructured mode we don't have the child's HIR,
-                // so just emit a placeholder referencing the proto.
+                // Try to resolve and emit inline if we have file context
+                if let Some(ctx) = self.file_ctx {
+                    if let Some(child_protos) = ctx.child_protos.get(self.func.proto_index) {
+                        if let Some(&bc_idx) = child_protos.get(*proto_id) {
+                            if let Some(child_func) = ctx.funcs.get(bc_idx) {
+                                // Anonymous closure: function(...) body end
+                                let mut child_emitter = LuaEmitter::new(child_func, self.file_ctx);
+                                child_emitter.indent = self.indent;
+                                self.output.push_str("function");
+                                child_emitter.emit_params_only();
+                                self.output.push_str(&child_emitter.output);
+                                child_emitter.output.clear();
+                                child_emitter.indent += 1;
+                                child_emitter.emit_body();
+                                child_emitter.indent -= 1;
+                                child_emitter.write_indent();
+                                child_emitter.output.push_str("end");
+                                self.output.push_str(&child_emitter.output);
+                                return;
+                            }
+                        }
+                    }
+                }
+
+                // Fallback: placeholder
                 let _ = write!(self.output, "function --[[proto#{}]]() end", proto_id);
             }
 
@@ -676,10 +882,78 @@ impl<'a> LuaEmitter<'a> {
         }
     }
 
-    fn emit_closure_body(&mut self, _expr_id: ExprId) {
-        // In unstructured mode, closures reference child protos by index.
-        // Full closure emission comes later when we lift child functions.
+    fn emit_closure_body(&mut self, expr_id: ExprId) {
+        // Try to resolve the closure to a child function
+        if let HirExpr::Closure { proto_id, .. } = self.func.exprs.get(expr_id) {
+            if let Some(ctx) = self.file_ctx {
+                if let Some(child_protos) = ctx.child_protos.get(self.func.proto_index) {
+                    if let Some(&bc_idx) = child_protos.get(*proto_id) {
+                        if let Some(child_func) = ctx.funcs.get(bc_idx) {
+                            // Emit params and body
+                            let mut child_emitter = LuaEmitter::new(child_func, self.file_ctx);
+                            child_emitter.indent = self.indent;
+                            // Emit just the params portion
+                            child_emitter.emit_params_only();
+                            self.output.push_str(&child_emitter.output);
+                            child_emitter.output.clear();
+                            child_emitter.indent += 1;
+                            child_emitter.emit_body();
+                            child_emitter.indent -= 1;
+                            child_emitter.write_indent();
+                            child_emitter.output.push_str("end");
+                            self.output.push_str(&child_emitter.output);
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        // Fallback
         self.output.push_str("() end");
+    }
+
+    /// Emit just the parameter list: `(params...)\n`
+    fn emit_params_only(&mut self) {
+        let has_self = self.func.params.first().map_or(false, |p| {
+            self.func.vars.get(*p).name.as_deref() == Some("self")
+        });
+        let param_start = if has_self { 1 } else { 0 };
+        let params = &self.func.params[param_start..];
+
+        self.output.push('(');
+        for (i, var_id) in params.iter().enumerate() {
+            if i > 0 {
+                self.output.push_str(", ");
+            }
+            self.output.push_str(&self.var_name(*var_id));
+        }
+        if self.func.is_vararg {
+            if !params.is_empty() {
+                self.output.push_str(", ");
+            }
+            self.output.push_str("...");
+        }
+        self.output.push_str(")\n");
+    }
+
+    /// Convert an expression to a string (for building qualified names).
+    fn expr_to_string(&self, expr_id: ExprId) -> String {
+        let expr = self.func.exprs.get(expr_id);
+        match expr {
+            HirExpr::Global(name) => name.clone(),
+            HirExpr::Var(var_id) => self.var_name(*var_id),
+            HirExpr::FieldAccess { table, field } => {
+                format!("{}.{}", self.expr_to_string(*table), field)
+            }
+            HirExpr::Upvalue(slot) => {
+                if let Some(Some(name)) = self.func.upvalue_names.get(*slot as usize) {
+                    name.clone()
+                } else {
+                    format!("upval_{}", slot)
+                }
+            }
+            _ => String::from("?"),
+        }
     }
 
     /// Emit an expression, wrapping in parentheses if its precedence is lower.

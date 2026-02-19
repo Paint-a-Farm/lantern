@@ -78,15 +78,20 @@ fn structure_region(
 
                 // Check for break/continue in loop context
                 if let (Some(succ_node), Some(lctx)) = (succ, loop_ctx) {
-                    if succ_node == lctx.header {
-                        result.push(HirStmt::Continue);
-                        current = None;
-                        continue;
-                    }
-                    if Some(succ_node) == lctx.exit {
-                        result.push(HirStmt::Break);
-                        current = None;
-                        continue;
+                    // A jump to the stop node is just the natural end of the
+                    // region — don't emit continue. For-loop bodies jump to
+                    // the ForNumBack/ForGenBack block as normal iteration.
+                    if Some(succ_node) != stop {
+                        if succ_node == lctx.header {
+                            result.push(HirStmt::Continue);
+                            current = None;
+                            continue;
+                        }
+                        if Some(succ_node) == lctx.exit {
+                            result.push(HirStmt::Break);
+                            current = None;
+                            continue;
+                        }
                     }
                 }
 

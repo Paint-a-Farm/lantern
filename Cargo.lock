@@ -172,6 +172,7 @@ dependencies = [
 name = "lantern-emit"
 version = "0.1.0"
 dependencies = [
+ "lantern-bytecode",
  "lantern-hir",
  "petgraph",
  "rustc-hash",

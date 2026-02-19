@@ -44,6 +44,7 @@ pub fn recover_variables(func: &mut HirFunc, scopes: &ScopeTree, num_params: u8)
         info.name = name;
         info.is_param = true;
         let var_id = func.vars.alloc(info);
+        func.params.push(var_id);
         // Bind all accesses to this param register that fall within its scope
         if let Some(reg_accesses) = by_register.get(&i) {
             for access in reg_accesses {

@@ -847,7 +847,21 @@ impl<'a> Lifter<'a> {
             // Closures
             OpCode::NewClosure | OpCode::DupClosure => {
                 let reg = self.reg_ref(insn.a, pc);
-                let proto_id = insn.d as usize;
+                // NEWCLOSURE: insn.d is the child_protos index directly
+                // DUPCLOSURE: insn.d is a constant index → Closure(global_func_idx)
+                //   We reverse-lookup through child_protos to get the local proto index
+                let proto_id = if insn.op == OpCode::DupClosure {
+                    match &self.func.constants[insn.d as usize] {
+                        lantern_bytecode::constant::Constant::Closure(global_idx) => {
+                            self.func.child_protos.iter()
+                                .position(|&cp| cp == *global_idx)
+                                .unwrap_or(*global_idx)
+                        }
+                        _ => insn.d as usize,
+                    }
+                } else {
+                    insn.d as usize
+                };
 
                 // CAPTURE instructions follow immediately
                 let mut captures = Vec::new();

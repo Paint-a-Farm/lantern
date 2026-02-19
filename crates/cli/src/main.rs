@@ -6,12 +6,13 @@ use lantern_hir::timing::{self, FileTimings, FuncTimings, PipelineReport, PHASE_
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        eprintln!("usage: lantern [--emit N] <file.l64> [file2.l64 ...]");
+        eprintln!("usage: lantern [--emit N | --file] <file.l64> [file2.l64 ...]");
         std::process::exit(1);
     }
 
     // Parse flags
     let mut emit_func: Option<usize> = None;
+    let mut file_mode = false;
     let mut raw_mode = false;
     let mut paths = Vec::new();
     let mut i = 0;
@@ -19,6 +20,8 @@ fn main() {
         if args[i] == "--emit" {
             i += 1;
             emit_func = Some(args[i].parse().expect("--emit expects a function index"));
+        } else if args[i] == "--file" {
+            file_mode = true;
         } else if args[i] == "--raw" {
             raw_mode = true;
         } else {
@@ -76,6 +79,10 @@ fn main() {
         let mut file_timings = FileTimings::new(path.as_str());
         file_timings.parse_time = parse_duration;
 
+        // Lift all functions
+        let mut hir_funcs: Vec<Option<lantern_hir::func::HirFunc>> =
+            (0..chunk.functions.len()).map(|_| None).collect();
+
         for func_idx in 0..chunk.functions.len() {
             let func_name = chunk
                 .get_string(chunk.functions[func_idx].debug.func_name_index)
@@ -119,7 +126,7 @@ fn main() {
                 func_timings.record(PHASE_PATTERNS, patterns_duration);
             }
 
-            if verbose {
+            if verbose && !file_mode {
                 let stmt_count: usize =
                     hir.cfg.node_weights().map(|b| b.stmts.len()).sum();
                 println!(
@@ -140,15 +147,40 @@ fn main() {
                     timing::timed(|| lantern_emit::emit_function(&hir));
                 func_timings.record(PHASE_EMIT, emit_duration);
 
-                println!("\n-- {} (fn #{}) --", func_name, func_idx);
-                println!("{}", lua_source);
+                println!("\n-- fn #{} --", func_idx);
+                print!("{}", lua_source);
                 println!("-- emit: {:.2?} --", emit_duration);
             }
 
             file_timings.functions.push(func_timings);
+            hir_funcs[func_idx] = Some(hir);
         }
 
-        if verbose && emit_func.is_none() {
+        // Full-file emission mode
+        if file_mode {
+            // Build child_protos mapping from bytecode
+            let child_protos: Vec<Vec<usize>> = chunk
+                .functions
+                .iter()
+                .map(|f| f.child_protos.clone())
+                .collect();
+
+
+            // Unwrap all HirFuncs (they were all lifted above)
+            let funcs: Vec<lantern_hir::func::HirFunc> = hir_funcs
+                .into_iter()
+                .map(|f| f.expect("all functions should be lifted"))
+                .collect();
+
+            let (lua_source, emit_duration) = timing::timed(|| {
+                lantern_emit::emit_file(&funcs, &child_protos, chunk.main)
+            });
+
+            print!("{}", lua_source);
+            if verbose {
+                eprintln!("-- file emit: {:.2?} --", emit_duration);
+            }
+        } else if verbose && emit_func.is_none() {
             println!(
                 "Parsed: {} ({:.2?})",
                 path, parse_duration,
