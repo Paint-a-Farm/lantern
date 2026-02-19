@@ -52,6 +52,8 @@ struct Lifter<'a> {
     /// Truthiness-based or/and chains (JUMPIF/JUMPIFNOT) detected in the
     /// instruction stream.
     truthy_chains: Vec<crate::bool_regions::TruthyChain>,
+    /// Compound `a and b or c` ternary expressions.
+    and_or_ternaries: Vec<crate::bool_regions::AndOrTernary>,
 }
 
 impl<'a> Lifter<'a> {
@@ -85,6 +87,7 @@ impl<'a> Lifter<'a> {
             pending_fastcall: 0,
             bool_regions: Vec::new(),
             truthy_chains: Vec::new(),
+            and_or_ternaries: Vec::new(),
         }
     }
 
@@ -101,11 +104,25 @@ impl<'a> Lifter<'a> {
         let mut suppressed = crate::bool_regions::detect_bool_regions(instructions);
         self.bool_regions = crate::bool_regions::find_bool_regions(instructions);
 
+        // Detect compound `a and b or c` ternaries FIRST (higher priority)
+        let (and_or_ternaries, and_or_suppressed) =
+            crate::bool_regions::detect_and_or_ternaries(instructions);
+        self.and_or_ternaries = and_or_ternaries;
+        suppressed.extend(and_or_suppressed);
+
         // Detect truthiness-based or/and chains (JUMPIF/JUMPIFNOT)
+        // Skip chains that overlap with already-detected and/or ternaries
         let (truthy_chains, truthy_suppressed) =
             crate::bool_regions::detect_truthy_chains(instructions);
-        self.truthy_chains = truthy_chains;
-        suppressed.extend(truthy_suppressed);
+        // Filter out chains whose jumps are already suppressed by ternaries
+        self.truthy_chains = truthy_chains.into_iter().filter(|chain| {
+            !chain.jump_pcs.iter().any(|pc| suppressed.contains(pc))
+        }).collect();
+        for chain in &self.truthy_chains {
+            for &jump_pc in &chain.jump_pcs {
+                suppressed.insert(jump_pc);
+            }
+        }
 
         // Discover block boundaries
         let starts = block_discovery::discover_block_starts(instructions, &suppressed);
@@ -134,6 +151,11 @@ impl<'a> Lifter<'a> {
             // Check if this PC starts a boolean value computation region.
             // If so, lift the entire region as a single expression.
             if let Some(advance) = self.try_lift_bool_region(pc) {
+                pc += advance;
+                continue;
+            }
+            // Check if this PC starts an `a and b or c` ternary.
+            if let Some(advance) = self.try_lift_and_or_ternary(pc) {
                 pc += advance;
                 continue;
             }
@@ -1364,6 +1386,84 @@ impl<'a> Lifter<'a> {
         self.emit_assign_reg(reg, result_expr);
 
         Some(end_pc - pc)
+    }
+
+    /// Try to lift a compound `a and b or c` ternary starting at `pc`.
+    ///
+    /// Pattern:
+    /// ```text
+    /// JumpIfNot Ra, +N       → fallback_pc  (if a falsy, skip to c)
+    /// [compute b into Rb]
+    /// JumpIf Rb, +M          → join_pc      (if b truthy, skip c)
+    /// [compute c into Rb]    ← fallback_pc
+    /// <join>                 ← join_pc: use Rb
+    /// ```
+    ///
+    /// Produces: `Rb = a and b or c`
+    fn try_lift_and_or_ternary(&mut self, pc: usize) -> Option<usize> {
+        let ternary_idx = self.and_or_ternaries.iter().position(|t| t.and_jump_pc == pc)?;
+
+        let and_jump_pc = self.and_or_ternaries[ternary_idx].and_jump_pc;
+        let or_jump_pc = self.and_or_ternaries[ternary_idx].or_jump_pc;
+        let fallback_pc = self.and_or_ternaries[ternary_idx].fallback_pc;
+        let join_pc = self.and_or_ternaries[ternary_idx].join_pc;
+        let and_reg = self.and_or_ternaries[ternary_idx].and_reg;
+        let result_reg = self.and_or_ternaries[ternary_idx].result_reg;
+
+        // The "a" operand: the value in and_reg was loaded by instructions
+        // already lifted before this PC. Pop the last RegAssign to and_reg.
+        let a_operand = self.pop_last_reg_assign(and_reg).unwrap_or_else(|| {
+            self.alloc_expr(HirExpr::Reg(self.reg_ref(and_reg, pc)), pc)
+        });
+
+        // Lift the "b" part: instructions between and_jump+1 and or_jump
+        let b_start = and_jump_pc + 1;
+        let mut seg_pc = b_start;
+        while seg_pc < or_jump_pc {
+            let insn = &self.func.instructions[seg_pc];
+            let advance = self.lift_instruction(insn, seg_pc);
+            seg_pc += advance;
+        }
+        // The "b" operand: the value in result_reg loaded by the b-segment
+        let b_operand = self.pop_last_reg_assign(result_reg).unwrap_or_else(|| {
+            self.alloc_expr(HirExpr::Reg(self.reg_ref(result_reg, or_jump_pc)), or_jump_pc)
+        });
+
+        // Lift the "c" part: instructions between fallback_pc and join_pc
+        seg_pc = fallback_pc;
+        while seg_pc < join_pc {
+            let insn = &self.func.instructions[seg_pc];
+            let advance = self.lift_instruction(insn, seg_pc);
+            seg_pc += advance;
+        }
+        // The "c" operand: the value in result_reg loaded by the c-segment
+        let c_operand = self.pop_last_reg_assign(result_reg).unwrap_or_else(|| {
+            self.alloc_expr(HirExpr::Reg(self.reg_ref(result_reg, fallback_pc)), fallback_pc)
+        });
+
+        // Build: a and b or c → Binary(Or, Binary(And, a, b), c)
+        let and_expr = self.alloc_expr(
+            HirExpr::Binary {
+                op: BinOp::And,
+                left: a_operand,
+                right: b_operand,
+            },
+            pc,
+        );
+        let result_expr = self.alloc_expr(
+            HirExpr::Binary {
+                op: BinOp::Or,
+                left: and_expr,
+                right: c_operand,
+            },
+            pc,
+        );
+
+        // Emit: result_reg = a and b or c
+        let reg = self.reg_ref(result_reg, pc);
+        self.emit_assign_reg(reg, result_expr);
+
+        Some(join_pc - pc)
     }
 
     /// Fold array elements from SETLIST into the Table expression for `table_reg`.

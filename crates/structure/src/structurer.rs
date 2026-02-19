@@ -265,11 +265,12 @@ struct LoopResult {
 /// Try to structure `node` as a while-loop header.
 ///
 /// A while-loop is detected when a Branch node's body has a path back
-/// to the header node (back-edge).
+/// to the header node (back-edge), WITHOUT passing through the `stop`
+/// node (which represents the outer loop header, if any).
 fn try_structure_while(
     func: &mut HirFunc,
     node: NodeIndex,
-    _stop: Option<NodeIndex>,
+    stop: Option<NodeIndex>,
     _outer_loop: Option<&LoopCtx>,
     visited: &mut FxHashSet<NodeIndex>,
 ) -> Option<LoopResult> {
@@ -287,11 +288,16 @@ fn try_structure_while(
 
     // Check which branch has a back-edge to the header — that's the body.
     // The other branch is the exit.
+    //
+    // We pass `stop` to prevent the DFS from traversing through the outer
+    // loop header. Without this, an if-statement inside a loop body would
+    // be misidentified as a nested while loop because its branches reach
+    // the outer header and loop back to this node.
     let (body_start, exit_node, loop_condition) =
-        if has_back_edge_to(&func.cfg, then_n, node) {
+        if has_back_edge_to(&func.cfg, then_n, node, stop) {
             // Then-branch loops back: body=then, exit=else, condition as-is
             (then_n, else_n, condition)
-        } else if has_back_edge_to(&func.cfg, else_n, node) {
+        } else if has_back_edge_to(&func.cfg, else_n, node, stop) {
             // Else-branch loops back: body=else, exit=then, negate condition
             let neg_cond = negate_condition(func, condition);
             (else_n, then_n, neg_cond)
@@ -322,19 +328,26 @@ fn try_structure_while(
     })
 }
 
-/// Check if any node reachable from `start` has a direct edge to `header`.
+/// Check if any node reachable from `start` has a direct edge to `header`,
+/// without passing through `barrier` (the outer loop header, if any).
 ///
-/// Skips LoopBack edges from ForNumBack/ForGenBack terminators — those
+/// The barrier prevents false positives: an if-statement inside a while-loop
+/// body has branches that eventually reach the outer loop header, which loops
+/// back to the if-statement's node. Without the barrier, this transitive path
+/// would make the if-statement look like a nested while loop.
+///
+/// Also skips LoopBack edges from ForNumBack/ForGenBack terminators — those
 /// belong to for-loops and should not trigger while-loop detection.
 fn has_back_edge_to(
     cfg: &lantern_hir::cfg::CfgGraph,
     start: NodeIndex,
     header: NodeIndex,
+    barrier: Option<NodeIndex>,
 ) -> bool {
     let mut visited = FxHashSet::default();
     let mut stack = vec![start];
     while let Some(node) = stack.pop() {
-        if node == header || !visited.insert(node) {
+        if node == header || Some(node) == barrier || !visited.insert(node) {
             continue;
         }
         // Don't follow for-loop back-edges — they're not while-loop structure

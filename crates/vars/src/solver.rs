@@ -17,7 +17,19 @@ use crate::collector::{self, RegAccess};
 /// After solving, rewrites all RegRef → VarId and RegAssign → Assign/LocalDecl.
 pub fn recover_variables(func: &mut HirFunc, scopes: &ScopeTree, num_params: u8) {
     let accesses = collector::collect_accesses(func);
+
+    // Always create parameter variables, even if there are no register accesses
+    // (e.g., an empty function body like `function Foo:delete() end` still needs
+    // its "self" parameter registered for correct colon-syntax detection).
     if accesses.is_empty() {
+        for i in 0..num_params {
+            let name = scopes.lookup(i, 0).map(|s| s.to_string());
+            let mut info = VarInfo::new();
+            info.name = name;
+            info.is_param = true;
+            let var_id = func.vars.alloc(info);
+            func.params.push(var_id);
+        }
         return;
     }
 

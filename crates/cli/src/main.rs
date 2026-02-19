@@ -15,6 +15,7 @@ fn main() {
     let mut file_mode = false;
     let mut raw_mode = false;
     let mut no_format = false;
+    let mut dump_bc = false;
     let mut paths = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -27,6 +28,8 @@ fn main() {
             raw_mode = true;
         } else if args[i] == "--no-format" {
             no_format = true;
+        } else if args[i] == "--dump" {
+            dump_bc = true;
         } else {
             paths.push(args[i].clone());
         }
@@ -77,6 +80,55 @@ fn main() {
                     eprintln!("  r{} = '{}' pc {}..{}", scope.register, scope.name, scope.pc_range.start, scope.pc_range.end);
                 }
             }
+        }
+
+        // Dump bytecode if requested
+        if dump_bc {
+            for (fi, f) in chunk.functions.iter().enumerate() {
+                if let Some(target) = emit_func {
+                    if fi != target { continue; }
+                }
+                let func_name = chunk.get_string(f.debug.func_name_index).unwrap_or_else(|| format!("fn#{}", fi));
+                println!("=== fn #{}: {} ({} instructions) ===", fi, func_name, f.instructions.len());
+                for (pc, insn) in f.instructions.iter().enumerate() {
+                    let const_str = match insn.op {
+                        lantern_bytecode::opcode::OpCode::GetTableKS
+                        | lantern_bytecode::opcode::OpCode::SetTableKS
+                        | lantern_bytecode::opcode::OpCode::NameCall => {
+                            if pc + 1 < f.instructions.len() {
+                                let aux = f.instructions[pc + 1].aux;
+                                chunk.get_string(aux as usize).map(|s| format!(" ; \"{}\"", s))
+                            } else { None }
+                        }
+                        lantern_bytecode::opcode::OpCode::LoadK => {
+                            if let Some(c) = f.constants.get(insn.d as usize) {
+                                Some(format!(" ; {:?}", c))
+                            } else { None }
+                        }
+                        lantern_bytecode::opcode::OpCode::GetImport => {
+                            let id = insn.d as u32;
+                            let count = (id >> 30) as u8;
+                            let mut parts = Vec::new();
+                            let bits = id & 0x3FFFFFFF;
+                            for j in 0..count {
+                                let idx = ((bits >> (20 - 10 * j)) & 0x3FF) as usize;
+                                if let Some(s) = chunk.get_string(idx) {
+                                    parts.push(s);
+                                }
+                            }
+                            if !parts.is_empty() {
+                                Some(format!(" ; {}", parts.join(".")))
+                            } else { None }
+                        }
+                        _ => None,
+                    };
+                    println!("  {:4}  {:?}\tA={} B={} C={} D={} E={}{}",
+                        pc, insn.op, insn.a, insn.b, insn.c, insn.d, insn.e,
+                        const_str.unwrap_or_default());
+                }
+                println!();
+            }
+            continue;
         }
 
         let mut file_timings = FileTimings::new(path.as_str());

@@ -11,7 +11,7 @@
 
 use lantern_hir::expr::HirExpr;
 use lantern_hir::func::HirFunc;
-use lantern_hir::stmt::{ElseIfClause, HirStmt};
+use lantern_hir::stmt::{ElseIfClause, HirStmt, LValue};
 use lantern_hir::types::{BinOp, UnOp};
 
 /// Apply all post-structuring patterns to the function.
@@ -29,6 +29,14 @@ fn transform_stmts(func: &mut HirFunc, stmts: Vec<HirStmt>) -> Vec<HirStmt> {
         let stmt = transform_stmt(func, stmt);
         result.push(stmt);
     }
+    // Merge consecutive early-exit guards (if cond then continue/break end)
+    result = merge_consecutive_guards(func, result);
+    // Flip single early-exit guards into wrapping if-then blocks
+    result = flip_guard_to_wrapper(func, result);
+    // Inline `local v = expr; return v` → `return expr`
+    result = inline_return_temps(func, result);
+    // Collapse `local _v1, _v2 = call(); x = _v1; y = _v2` → `x, y = call()`
+    result = collapse_multi_return_temps(func, result);
     result
 }
 
@@ -361,5 +369,305 @@ fn negate_condition(func: &mut HirFunc, condition: lantern_hir::arena::ExprId) -
         op: UnOp::Not,
         operand: condition,
     })
+}
+
+/// Negate a condition, applying De Morgan's law to `or` chains.
+/// `c1 or c2 or c3` → `(not c1) and (not c2) and (not c3)`
+/// For non-or expressions, falls back to simple negation.
+fn negate_or_chain(func: &mut HirFunc, condition: lantern_hir::arena::ExprId) -> lantern_hir::arena::ExprId {
+    // Flatten the or-chain
+    let mut terms = Vec::new();
+    flatten_or_chain(func, condition, &mut terms);
+
+    if terms.len() <= 1 {
+        return negate_condition(func, condition);
+    }
+
+    // Negate each term and combine with `and`
+    let mut result = negate_condition(func, terms[0]);
+    for &term in &terms[1..] {
+        let neg = negate_condition(func, term);
+        result = func.exprs.alloc(HirExpr::Binary {
+            op: BinOp::And,
+            left: result,
+            right: neg,
+        });
+    }
+    result
+}
+
+/// Flatten a left-associative `or` chain into individual terms.
+fn flatten_or_chain(func: &HirFunc, expr: lantern_hir::arena::ExprId, out: &mut Vec<lantern_hir::arena::ExprId>) {
+    if let HirExpr::Binary { op: BinOp::Or, left, right } = func.exprs.get(expr) {
+        flatten_or_chain(func, *left, out);
+        out.push(*right);
+    } else {
+        out.push(expr);
+    }
+}
+
+/// Check if a statement is `if cond then continue end` or `if cond then break end`
+/// with no elseif/else branches.
+fn is_early_exit_guard(stmt: &HirStmt) -> Option<(&lantern_hir::arena::ExprId, bool)> {
+    if let HirStmt::If {
+        condition,
+        then_body,
+        elseif_clauses,
+        else_body,
+    } = stmt
+    {
+        if elseif_clauses.is_empty()
+            && else_body.is_none()
+            && then_body.len() == 1
+        {
+            let is_continue = matches!(&then_body[0], HirStmt::Continue);
+            let is_break = matches!(&then_body[0], HirStmt::Break);
+            if is_continue || is_break {
+                return Some((condition, is_continue));
+            }
+        }
+    }
+    None
+}
+
+/// Merge consecutive early-exit guards with the same exit type.
+///
+/// ```text
+/// if cond1 then continue end     -->   if cond1 or cond2 then continue end
+/// if cond2 then continue end
+/// ```
+fn merge_consecutive_guards(func: &mut HirFunc, stmts: Vec<HirStmt>) -> Vec<HirStmt> {
+    if stmts.len() < 2 {
+        return stmts;
+    }
+
+    let mut result: Vec<HirStmt> = Vec::with_capacity(stmts.len());
+    let mut i = 0;
+
+    while i < stmts.len() {
+        if let Some((&first_cond, first_is_continue)) = is_early_exit_guard(&stmts[i]) {
+            // Collect consecutive guards with the same exit type
+            let mut merged_cond = first_cond;
+            let mut j = i + 1;
+            while j < stmts.len() {
+                if let Some((&next_cond, next_is_continue)) = is_early_exit_guard(&stmts[j]) {
+                    if next_is_continue == first_is_continue {
+                        merged_cond = func.exprs.alloc(HirExpr::Binary {
+                            op: BinOp::Or,
+                            left: merged_cond,
+                            right: next_cond,
+                        });
+                        j += 1;
+                        continue;
+                    }
+                }
+                break;
+            }
+
+            if j > i + 1 {
+                // We merged multiple guards
+                let exit_stmt = if first_is_continue {
+                    HirStmt::Continue
+                } else {
+                    HirStmt::Break
+                };
+                result.push(HirStmt::If {
+                    condition: merged_cond,
+                    then_body: vec![exit_stmt],
+                    elseif_clauses: Vec::new(),
+                    else_body: None,
+                });
+                i = j;
+            } else {
+                result.push(stmts[i].clone());
+                i += 1;
+            }
+        } else {
+            result.push(stmts[i].clone());
+            i += 1;
+        }
+    }
+
+    result
+}
+
+/// Flip a single early-exit guard at the start of a list into a wrapping if block.
+///
+/// ```text
+/// if cond then continue end     -->   if not cond then
+/// stmt1                                   stmt1
+/// stmt2                                   stmt2
+///                                     end
+/// ```
+///
+/// Only applies when the guard is the first statement and there are
+/// following statements to wrap.
+fn flip_guard_to_wrapper(func: &mut HirFunc, stmts: Vec<HirStmt>) -> Vec<HirStmt> {
+    if stmts.len() < 2 {
+        return stmts;
+    }
+
+    // Only flip `continue` guards (break has different semantics — it exits the loop)
+    if let Some((&cond, true)) = is_early_exit_guard(&stmts[0]) {
+        // Apply De Morgan's law when negating an `or` chain:
+        // not (c1 or c2 or c3) → (not c1) and (not c2) and (not c3)
+        let inv_cond = negate_or_chain(func, cond);
+        let rest: Vec<HirStmt> = stmts[1..].to_vec();
+
+        vec![HirStmt::If {
+            condition: inv_cond,
+            then_body: rest,
+            elseif_clauses: Vec::new(),
+            else_body: None,
+        }]
+    } else {
+        stmts
+    }
+}
+
+/// Inline `local v = expr; return v` → `return expr`.
+///
+/// Handles three patterns:
+/// 1. Single: `local v = expr; return v` → `return expr`
+/// 2. MultiAssign: `local a, b = call(); return a, b` → `return call()`
+/// 3. Sequence: `local a = e1; local b = e2; return a, b` → `return e1, e2`
+fn inline_return_temps(func: &HirFunc, mut stmts: Vec<HirStmt>) -> Vec<HirStmt> {
+    if stmts.len() < 2 {
+        return stmts;
+    }
+
+    let last_idx = stmts.len() - 1;
+
+    if let HirStmt::Return(ret_vals) = &stmts[last_idx] {
+        if ret_vals.is_empty() {
+            return stmts;
+        }
+
+        let n = ret_vals.len();
+
+        // Check for sequence of N Assigns before the Return, one per return value
+        if stmts.len() >= n + 1 {
+            let start = last_idx - n;
+            let mut all_match = true;
+            let mut values = Vec::with_capacity(n);
+
+            for i in 0..n {
+                if let HirStmt::Assign { target: LValue::Local(def_var), value } = &stmts[start + i] {
+                    if let HirExpr::Var(ret_var) = func.exprs.get(ret_vals[i]) {
+                        if ret_var == def_var {
+                            values.push(*value);
+                            continue;
+                        }
+                    }
+                }
+                all_match = false;
+                break;
+            }
+
+            if all_match {
+                // Remove the N assign statements and rewrite the return
+                for _ in 0..n {
+                    stmts.remove(start);
+                }
+                stmts[start] = HirStmt::Return(values);
+                return stmts;
+            }
+        }
+
+        // MultiAssign pattern: `local a, b = call(); return a, b` → `return call()`
+        let prev_idx = last_idx - 1;
+        if let HirStmt::MultiAssign { targets, values } = &stmts[prev_idx] {
+            if targets.len() == n && values.len() == 1 {
+                let all_match = targets.iter().zip(ret_vals.iter()).all(|(t, rv)| {
+                    if let (LValue::Local(tv), HirExpr::Var(rv)) = (t, func.exprs.get(*rv)) {
+                        tv == rv
+                    } else {
+                        false
+                    }
+                });
+                if all_match {
+                    let values = values.clone();
+                    stmts.remove(prev_idx);
+                    stmts[prev_idx] = HirStmt::Return(values);
+                    return stmts;
+                }
+            }
+        }
+    }
+
+    stmts
+}
+
+/// Collapse multi-return temps into direct assignment.
+///
+/// Pattern:
+/// ```text
+/// local _v1, _v2, _v3 = call(...)   -- MultiAssign with unnamed temps
+/// x = _v1                           -- (or local x = _v1)
+/// y = _v2
+/// z = _v3
+/// ```
+///
+/// Transforms into:
+/// ```text
+/// x, y, z = call(...)               -- (or local x, y, z = call(...))
+/// ```
+///
+/// Only applies when ALL temp variables are unnamed and each is used exactly
+/// once in the immediately following assign statements.
+fn collapse_multi_return_temps(func: &HirFunc, mut stmts: Vec<HirStmt>) -> Vec<HirStmt> {
+    let mut i = 0;
+    while i < stmts.len() {
+        if let HirStmt::MultiAssign { targets, values } = &stmts[i] {
+            let n = targets.len();
+
+            // Check: all targets are unnamed temp variables
+            let all_unnamed = targets.iter().all(|t| {
+                if let LValue::Local(var_id) = t {
+                    func.vars.get(*var_id).name.is_none()
+                } else {
+                    false
+                }
+            });
+
+            if all_unnamed && i + n < stmts.len() {
+                // Check: next N statements are Assign { target: real_var, value: Var(temp) }
+                // where temp matches the corresponding MultiAssign target
+                let mut real_targets = Vec::with_capacity(n);
+                let mut all_match = true;
+
+                for j in 0..n {
+                    if let HirStmt::Assign { target: real_target, value } = &stmts[i + 1 + j] {
+                        if let LValue::Local(temp_var) = &targets[j] {
+                            if let HirExpr::Var(used_var) = func.exprs.get(*value) {
+                                if used_var == temp_var {
+                                    real_targets.push(real_target.clone());
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    all_match = false;
+                    break;
+                }
+
+                if all_match {
+                    // Replace: MultiAssign + N assigns → single MultiAssign with real targets
+                    let values = values.clone();
+                    for _ in 0..n {
+                        stmts.remove(i + 1);
+                    }
+                    stmts[i] = HirStmt::MultiAssign {
+                        targets: real_targets,
+                        values,
+                    };
+                    i += 1;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    stmts
 }
 
