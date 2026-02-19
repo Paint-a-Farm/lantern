@@ -91,19 +91,7 @@ fn main() {
             }
         };
 
-        // Temporary: dump debug scopes when DEBUG_SCOPES=1
-        if std::env::var("DEBUG_SCOPES").is_ok() {
-            for (fi, f) in chunk.functions.iter().enumerate() {
-                if emit_func != Some(fi) { continue; }
-                let func_name = chunk.get_string(f.debug.func_name_index).unwrap_or_else(|| format!("fn#{}", fi));
-                eprintln!("=== Debug scopes for {} (fn #{}) — {} entries ===", func_name, fi, f.debug.scopes.all_scopes().len());
-                for scope in f.debug.scopes.all_scopes() {
-                    eprintln!("  r{} = '{}' pc {}..{}", scope.register, scope.name, scope.pc_range.start, scope.pc_range.end);
-                }
-            }
-        }
-
-        // Dump bytecode if requested
+            // Dump bytecode if requested
         if dump_bc {
             for (fi, f) in chunk.functions.iter().enumerate() {
                 if let Some(target) = emit_func {
@@ -178,6 +166,7 @@ fn main() {
                 let debug_cfg = std::env::var("DEBUG_CFG").is_ok() && emit_func == Some(func_idx);
 
                 let bc_func = &chunk.functions[func_idx];
+
                 let ((), vars_duration) = timing::timed(|| {
                     lantern_vars::recover_variables(
                         &mut hir,
@@ -267,7 +256,6 @@ fn main() {
                 .iter()
                 .map(|f| f.child_protos.clone())
                 .collect();
-
 
             // Unwrap all HirFuncs (they were all lifted above)
             let funcs: Vec<lantern_hir::func::HirFunc> = hir_funcs

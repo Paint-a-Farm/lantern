@@ -95,34 +95,14 @@ pub fn recover_variables(func: &mut HirFunc, scopes: &ScopeTree, num_params: u8)
             let scope = find_scope(scopes, register, access.reg.pc);
 
             if let Some(scope) = scope {
-                // For defs within scope, check liveness: skip if the value is
-                // dead (overwritten by another def before any use of this register).
+                // If a scope covers this PC, the compiler intended this register
+                // to have that name. Bind unconditionally — even if the value is
+                // immediately overwritten. The scope IS the authority.
                 //
-                // IMPORTANT: Only check accesses in the SAME basic block.
-                // PC ordering only reflects control flow within a single block.
-                // A "later" PC in a different block might be in a parallel branch
-                // (e.g., the else-branch of an if statement), not a successor.
-                if access.is_def {
-                    let pc = access.reg.pc;
-                    let block = access.block_pc_range;
-                    // Find the next access of the same register after this def
-                    // within the same basic block
-                    let next_access = reg_accesses.iter()
-                        .filter(|a| a.reg.pc > pc && a.block_pc_range == block)
-                        .min_by_key(|a| a.reg.pc);
-                    if let Some(next) = next_access {
-                        if next.is_def {
-                            // Next access in this block is another def — value is dead.
-                            // Create an unnamed temporary instead.
-                            let mut info = VarInfo::new();
-                            info.def_pcs.push(access.reg.pc);
-                            let var_id = func.vars.alloc(info);
-                            def_var.insert(access.reg, var_id);
-                            continue;
-                        }
-                    }
-                }
-
+                // Previous code had a liveness check here that created unnamed
+                // temps for "dead" defs (overwritten before any use). This was
+                // wrong: `local _, eventId = call()` repeated 20 times writes
+                // r1 each time, and r1 is always "dead", but the scope says `_`.
                 let key = (register, scope.0.to_string(), scope.1);
                 let var_id = *scope_vars.entry(key).or_insert_with(|| {
                     let mut info = VarInfo::new();
@@ -357,8 +337,14 @@ fn bind_scope_initializers(
             }
         }
 
-        // Table constructor forward match: scope may start several PCs after
-        // the def because DupTable + SETTABLEKS fields come between.
+        // Forward match: scope may start several PCs after the def because
+        // of intervening instructions that are part of the initialization.
+        //
+        // Two patterns:
+        // 1. Table constructor: DupTable/NewTable + SETTABLEKS fields
+        // 2. Closure: NewClosure/DupClosure + CAPTURE instructions
+        //
+        // In both cases, the scope opens after the initialization sequence.
         if scope_start >= 1 {
             // Check if any candidate was found above
             let already_bound = candidates.iter().any(|&pc| {
@@ -369,12 +355,10 @@ fn bind_scope_initializers(
                 })
             });
             if !already_bound {
-                // Try table constructor pattern
                 if let Some(reg_accesses) = by_register.get(&register) {
+                    // Try table constructor pattern
                     if let Some(scope_result) = find_next_scope_after_strict(scopes, register, 0, reg_accesses) {
-                        // Only if this is the scope we're looking for
                         if scope_result.1 == scope_start {
-                            // Find the table def that initiated this scope
                             for access in reg_accesses.iter() {
                                 if access.is_def && access.is_table_def && access.reg.pc < scope_start {
                                     if !def_var_has_named(def_var, func, &access.reg) {
@@ -395,10 +379,60 @@ fn bind_scope_initializers(
                             }
                         }
                     }
+
+                    // Try closure pattern: NewClosure/DupClosure at PC N followed
+                    // by CAPTURE instructions, with scope starting after the last
+                    // capture. The gap between def and scope can be large (one PC
+                    // per captured upvalue).
+                    if !def_var_has_named_for_scope(def_var, func, register, scope_start, accesses) {
+                        for access in reg_accesses.iter() {
+                            if access.is_def && access.is_closure_def && access.reg.pc < scope_start {
+                                // Verify no uses of this register between def and scope start
+                                let has_intervening_use = reg_accesses.iter().any(|a| {
+                                    !a.is_def
+                                        && a.reg.pc > access.reg.pc
+                                        && a.reg.pc < scope_start
+                                });
+                                if has_intervening_use {
+                                    continue;
+                                }
+                                if !def_var_has_named(def_var, func, &access.reg) {
+                                    let var_id = find_existing_scope_var(func, register, scope_name, scope_start, def_var, accesses)
+                                        .unwrap_or_else(|| {
+                                            let mut info = VarInfo::new();
+                                            info.name = Some(scope_name.to_string());
+                                            func.vars.alloc(info)
+                                        });
+                                    let info = func.vars.get_mut(var_id);
+                                    if !info.def_pcs.contains(&access.reg.pc) {
+                                        info.def_pcs.push(access.reg.pc);
+                                    }
+                                    def_var.insert(access.reg, var_id);
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
     }
+}
+
+/// Check if a scope already has a named binding from a previous phase.
+fn def_var_has_named_for_scope(
+    def_var: &FxHashMap<RegRef, VarId>,
+    func: &HirFunc,
+    register: u8,
+    scope_start: usize,
+    accesses: &[RegAccess],
+) -> bool {
+    accesses.iter().any(|a| {
+        a.is_def && a.reg.register == register && a.reg.pc < scope_start
+            && def_var.get(&a.reg).map_or(false, |&vid| {
+                func.vars.get(vid).name.is_some()
+            })
+    })
 }
 
 /// Bind pre-scope defs to named variables using CFG structure.
