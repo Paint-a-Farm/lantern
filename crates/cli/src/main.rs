@@ -175,6 +175,8 @@ fn main() {
 
             // Variable recovery: resolve registers → named variables
             if !raw_mode {
+                let debug_cfg = std::env::var("DEBUG_CFG").is_ok() && emit_func == Some(func_idx);
+
                 let bc_func = &chunk.functions[func_idx];
                 let ((), vars_duration) = timing::timed(|| {
                     lantern_vars::recover_variables(
@@ -185,6 +187,11 @@ fn main() {
                 });
                 func_timings.record(PHASE_VARS, vars_duration);
 
+                if debug_cfg {
+                    eprintln!("=== AFTER VARS (fn #{}) ===", func_idx);
+                    dump_cfg_blocks(&hir);
+                }
+
                 // Expression simplification: collapse multi-return, then inline temps
                 // (before structuring — the structurer inspects body sizes for guard detection)
                 let ((), exprs_duration) = timing::timed(|| {
@@ -193,11 +200,21 @@ fn main() {
                 });
                 func_timings.record(PHASE_EXPRS, exprs_duration);
 
+                if debug_cfg {
+                    eprintln!("=== AFTER EXPRS (fn #{}) ===", func_idx);
+                    dump_cfg_blocks(&hir);
+                }
+
                 // CFG structuring: collapse flat blocks into nested control flow
                 let ((), structure_duration) = timing::timed(|| {
                     lantern_structure::structure_function(&mut hir);
                 });
                 func_timings.record(PHASE_STRUCTURE, structure_duration);
+
+                if debug_cfg {
+                    eprintln!("=== AFTER STRUCTURE (fn #{}) ===", func_idx);
+                    dump_cfg_blocks(&hir);
+                }
 
                 // Post-structuring patterns: normalize elseif chains, merge conditions
                 let ((), patterns_duration) = timing::timed(|| {
@@ -320,6 +337,17 @@ fn format_luau(code: &str, path: &str) -> String {
         Err(e) => {
             eprintln!("stylua format error in {}: {}", path, e);
             code.to_string()
+        }
+    }
+}
+
+fn dump_cfg_blocks(hir: &lantern_hir::func::HirFunc) {
+    for node in hir.cfg.node_indices() {
+        let block = &hir.cfg[node];
+        eprintln!("  block {:?} (pc {:?}): {} stmts, terminator={:?}",
+            node, block.pc_range, block.stmts.len(), block.terminator);
+        for (i, stmt) in block.stmts.iter().enumerate() {
+            eprintln!("    stmt[{}]: {:?}", i, stmt);
         }
     }
 }

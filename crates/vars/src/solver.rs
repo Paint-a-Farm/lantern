@@ -1,3 +1,5 @@
+use petgraph::stable_graph::NodeIndex;
+use petgraph::Direction;
 use rustc_hash::FxHashMap;
 
 use lantern_bytecode::scope_tree::ScopeTree;
@@ -73,11 +75,14 @@ pub fn recover_variables(func: &mut HirFunc, scopes: &ScopeTree, num_params: u8)
         }
     }
 
-    // Phase 3: For each register, create variables from scope partitioning.
-    // Defs in the same scope create/share a variable. Uses in the same scope
-    // also bind to that variable.
+    // Phase 3: Match accesses that fall STRICTLY within a scope range.
+    // No pc+1 guessing — only exact containment.
+    //
+    // For USES: always bind if inside a scope.
+    // For DEFS: only bind if the value is "live" — i.e., there's no later
+    // def of the same register before a use. This prevents binding discarded
+    // call results that happen to reuse a named variable's register.
     for (&register, reg_accesses) in &by_register {
-        // Group by scope: accesses in the same scope → same variable
         let mut scope_vars: FxHashMap<(u8, String, usize), VarId> = FxHashMap::default();
 
         for access in reg_accesses {
@@ -86,39 +91,38 @@ pub fn recover_variables(func: &mut HirFunc, scopes: &ScopeTree, num_params: u8)
                 continue; // Already bound (e.g., parameter)
             }
 
-            // For defs, the bytecode compiler starts the scope at the
-            // instruction AFTER the defining instruction. Try pc+1 first.
-            // For AUX-word instructions (NewTable, GetImport, etc.) that
-            // occupy 2 slots, the scope may start at pc+2 — but only if
-            // a scope actually STARTS there (not just contains it) AND
-            // the access is flagged as having an AUX word.
-            let scope = find_scope(scopes, register, access.reg.pc)
-                .or_else(|| {
-                    if access.is_def {
-                        find_scope(scopes, register, access.reg.pc + 1)
-                            .or_else(|| find_scope_starting_at(scopes, register, access.reg.pc + 1))
-                            .or_else(|| {
-                                if access.has_aux {
-                                    find_scope_starting_at(scopes, register, access.reg.pc + 2)
-                                } else {
-                                    None
-                                }
-                            })
-                            // Table constructor pattern: DupTable/NewTable at PC X, followed
-                            // by SETTABLEKS field assignments, with the scope starting after
-                            // all fields are set. Only for table constructor defs.
-                            .or_else(|| {
-                                if access.is_table_def {
-                                    find_next_scope_after(scopes, register, access.reg.pc, reg_accesses)
-                                } else {
-                                    None
-                                }
-                            })
-                    } else {
-                        None
-                    }
-                });
+            // Strict containment: the access PC must be inside a scope range
+            let scope = find_scope(scopes, register, access.reg.pc);
+
             if let Some(scope) = scope {
+                // For defs within scope, check liveness: skip if the value is
+                // dead (overwritten by another def before any use of this register).
+                //
+                // IMPORTANT: Only check accesses in the SAME basic block.
+                // PC ordering only reflects control flow within a single block.
+                // A "later" PC in a different block might be in a parallel branch
+                // (e.g., the else-branch of an if statement), not a successor.
+                if access.is_def {
+                    let pc = access.reg.pc;
+                    let block = access.block_pc_range;
+                    // Find the next access of the same register after this def
+                    // within the same basic block
+                    let next_access = reg_accesses.iter()
+                        .filter(|a| a.reg.pc > pc && a.block_pc_range == block)
+                        .min_by_key(|a| a.reg.pc);
+                    if let Some(next) = next_access {
+                        if next.is_def {
+                            // Next access in this block is another def — value is dead.
+                            // Create an unnamed temporary instead.
+                            let mut info = VarInfo::new();
+                            info.def_pcs.push(access.reg.pc);
+                            let var_id = func.vars.alloc(info);
+                            def_var.insert(access.reg, var_id);
+                            continue;
+                        }
+                    }
+                }
+
                 let key = (register, scope.0.to_string(), scope.1);
                 let var_id = *scope_vars.entry(key).or_insert_with(|| {
                     let mut info = VarInfo::new();
@@ -126,7 +130,6 @@ pub fn recover_variables(func: &mut HirFunc, scopes: &ScopeTree, num_params: u8)
                     func.vars.alloc(info)
                 });
 
-                // Record def/use on existing variable
                 let info = func.vars.get_mut(var_id);
                 if access.is_def {
                     if !info.def_pcs.contains(&access.reg.pc) {
@@ -151,6 +154,29 @@ pub fn recover_variables(func: &mut HirFunc, scopes: &ScopeTree, num_params: u8)
             }
         }
     }
+
+    // Phase 3a: Bind defining instructions to their scopes using the known
+    // Luau compiler invariant: scope starts 1 PC after the def (or 2 for AUX).
+    //
+    // For each scope, look for a def at exactly (scope_start - 1) or
+    // (scope_start - 2 for AUX). This is deterministic: no scanning, no
+    // heuristics, just the known offset.
+    //
+    // Also handles table constructors (DupTable/NewTable) where the scope
+    // opens after field initialization instructions.
+    bind_scope_initializers(func, scopes, &accesses, &by_register, &mut def_var);
+
+    // Phase 3b: CFG-based pre-scope binding.
+    //
+    // When the Luau compiler writes a register in multiple branches before
+    // opening its scope at the join point, the defs fall outside the scope.
+    // Example: `if cond then R4=1 else R4=0 end` with scope starting at
+    // the join point.
+    //
+    // Use the CFG to find such patterns: for each scope with unbound defs,
+    // check if predecessor blocks contain unresolved defs of the same register
+    // that flow directly into the scope start.
+    bind_prescope_defs_via_cfg(func, scopes, &accesses, &mut def_var);
 
     // Phase 4: Resolve unscopped uses by finding their reaching def.
     // For each unresolved use of register R at PC p, find the latest
@@ -221,43 +247,20 @@ fn find_scope(scopes: &ScopeTree, register: u8, pc: usize) -> Option<(&str, usiz
     best.map(|(name, start, _)| (name, start))
 }
 
-/// Find a scope for a register that STARTS at exactly the given PC.
-/// Unlike find_scope (which finds any enclosing scope), this only matches
-/// scopes whose start boundary is at the specified PC. Used for AUX-word
-/// instructions where the scope starts 2 PCs after the def.
-fn find_scope_starting_at(scopes: &ScopeTree, register: u8, pc: usize) -> Option<(&str, usize)> {
-    for scope in scopes.scopes_for_register(register) {
-        if scope.pc_range.start == pc {
-            return Some((&scope.name, scope.pc_range.start));
-        }
-    }
-    None
-}
-
-/// Find the scope for a register that starts after the given PC,
-/// but ONLY when the def is the FIRST def of this register.
-/// This handles the table constructor pattern: DupTable/NewTable defines the register
-/// at PC X, followed by SETTABLEKS field assignments, with the scope starting after
-/// all fields are set. The bytecode compiler delays the scope start until after
-/// the full constructor. We only match the first def because later defs of
-/// the same register are likely temporaries reusing a register slot.
-fn find_next_scope_after<'a>(
+/// Find the scope for a register that starts after the given PC (strict mode).
+///
+/// Only used for table constructor defs where the pattern is unambiguous:
+/// DupTable/NewTable at PC X, SETTABLEKS fields follow, scope starts after
+/// all fields are set.
+///
+/// For non-table defs, use the CFG-based `bind_prescope_defs_via_cfg` instead.
+fn find_next_scope_after_strict<'a>(
     scopes: &'a ScopeTree,
     register: u8,
     pc: usize,
     reg_accesses: &[&RegAccess],
 ) -> Option<(&'a str, usize)> {
-    // Check if this is the first def of this register
-    let first_def_pc = reg_accesses
-        .iter()
-        .filter(|a| a.is_def)
-        .map(|a| a.reg.pc)
-        .min();
-    if first_def_pc != Some(pc) {
-        return None;
-    }
-
-    // Find the nearest scope starting after this PC
+    // Find the nearest scope starting after this def's PC
     let mut best: Option<(&str, usize)> = None;
     for scope in scopes.scopes_for_register(register) {
         if scope.pc_range.start > pc {
@@ -267,18 +270,339 @@ fn find_next_scope_after<'a>(
         }
     }
 
-    // Safety check: no other defs of this register between the def and
-    // scope start (register reuse as temporary).
-    if let Some((_, scope_start)) = best {
-        let has_intervening_defs = reg_accesses
-            .iter()
-            .any(|a| a.is_def && a.reg.pc > pc && a.reg.pc < scope_start);
-        if has_intervening_defs {
-            return None;
-        }
+    let (_, scope_start) = best?;
+
+    // No uses between def and scope start
+    let has_intervening_use = reg_accesses
+        .iter()
+        .any(|a| !a.is_def && a.reg.pc > pc && a.reg.pc < scope_start);
+    if has_intervening_use {
+        return None;
     }
 
     best
+}
+
+/// Bind defining instructions to their scopes using compiler invariants.
+///
+/// The Luau compiler starts a variable's scope on the instruction AFTER the
+/// defining STORE. So for `local x = expr`, if the STORE is at PC N, the
+/// scope starts at PC N+1. For AUX instructions (NewTable, GetImport), the
+/// scope starts at PC N+2 because the instruction occupies 2 PC slots.
+///
+/// For table constructors (DupTable/NewTable + SETTABLEKS), the scope opens
+/// after all field-init instructions complete.
+///
+/// This function iterates over every scope and looks for a def at exactly
+/// the expected PC offset. No scanning, no heuristics.
+fn bind_scope_initializers(
+    func: &mut HirFunc,
+    scopes: &ScopeTree,
+    accesses: &[RegAccess],
+    by_register: &FxHashMap<u8, Vec<&RegAccess>>,
+    def_var: &mut FxHashMap<RegRef, VarId>,
+) {
+    // Build a quick lookup: (register, pc) → &RegAccess for defs
+    let mut def_at_pc: FxHashMap<(u8, usize), &RegAccess> = FxHashMap::default();
+    for access in accesses {
+        if access.is_def {
+            def_at_pc.insert((access.reg.register, access.reg.pc), access);
+        }
+    }
+
+    // For each scope, try to find its defining instruction
+    for scope in scopes.all_scopes() {
+        let register = scope.register;
+        let scope_start = scope.pc_range.start;
+        let scope_name = &scope.name;
+
+        // Try the known offsets: scope_start - 1 (normal) and scope_start - 2 (AUX)
+        let candidates: &[usize] = if scope_start >= 2 {
+            &[scope_start - 1, scope_start - 2]
+        } else if scope_start >= 1 {
+            &[scope_start - 1]
+        } else {
+            &[]
+        };
+
+        for &candidate_pc in candidates {
+            if let Some(access) = def_at_pc.get(&(register, candidate_pc)) {
+                // Check it's not already bound to a named variable
+                if def_var_has_named(def_var, func, &access.reg) {
+                    // Already correctly bound — done for this scope
+                    break;
+                }
+
+                // For the pc-2 case, verify the instruction actually has an AUX word
+                if candidate_pc == scope_start.saturating_sub(2) && scope_start >= 2 && candidate_pc != scope_start - 1 {
+                    if !access.has_aux {
+                        continue;
+                    }
+                }
+
+                // Create or reuse the variable for this scope
+                let var_id = find_existing_scope_var(func, register, scope_name, scope_start, def_var, accesses)
+                    .unwrap_or_else(|| {
+                        let mut info = VarInfo::new();
+                        info.name = Some(scope_name.to_string());
+                        func.vars.alloc(info)
+                    });
+
+                let info = func.vars.get_mut(var_id);
+                if !info.def_pcs.contains(&access.reg.pc) {
+                    info.def_pcs.push(access.reg.pc);
+                }
+                def_var.insert(access.reg, var_id);
+                break; // Found the initializer for this scope
+            }
+        }
+
+        // Table constructor forward match: scope may start several PCs after
+        // the def because DupTable + SETTABLEKS fields come between.
+        if scope_start >= 1 {
+            // Check if any candidate was found above
+            let already_bound = candidates.iter().any(|&pc| {
+                def_at_pc.get(&(register, pc)).map_or(false, |a| {
+                    def_var.get(&a.reg).map_or(false, |&vid| {
+                        func.vars.get(vid).name.is_some()
+                    })
+                })
+            });
+            if !already_bound {
+                // Try table constructor pattern
+                if let Some(reg_accesses) = by_register.get(&register) {
+                    if let Some(scope_result) = find_next_scope_after_strict(scopes, register, 0, reg_accesses) {
+                        // Only if this is the scope we're looking for
+                        if scope_result.1 == scope_start {
+                            // Find the table def that initiated this scope
+                            for access in reg_accesses.iter() {
+                                if access.is_def && access.is_table_def && access.reg.pc < scope_start {
+                                    if !def_var_has_named(def_var, func, &access.reg) {
+                                        let var_id = find_existing_scope_var(func, register, scope_name, scope_start, def_var, accesses)
+                                            .unwrap_or_else(|| {
+                                                let mut info = VarInfo::new();
+                                                info.name = Some(scope_name.to_string());
+                                                func.vars.alloc(info)
+                                            });
+                                        let info = func.vars.get_mut(var_id);
+                                        if !info.def_pcs.contains(&access.reg.pc) {
+                                            info.def_pcs.push(access.reg.pc);
+                                        }
+                                        def_var.insert(access.reg, var_id);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Bind pre-scope defs to named variables using CFG structure.
+///
+/// When the Luau compiler writes a register in multiple code paths before
+/// opening its debug scope at a join point, the defs fall outside the scope.
+///
+/// This function uses the CFG to find the pattern deterministically:
+/// 1. Find blocks where a named scope starts
+/// 2. For each predecessor block, find the LAST def of that register
+/// 3. If the def is unresolved (no scope), bind it to the named variable
+///
+/// This handles:
+/// - if/else both writing R4, scope starting at the join point
+/// - Single-path writes before scope (e.g., initialization before scope opens)
+fn bind_prescope_defs_via_cfg(
+    func: &mut HirFunc,
+    scopes: &ScopeTree,
+    accesses: &[RegAccess],
+    def_var: &mut FxHashMap<RegRef, VarId>,
+) {
+    // Build a map: block_start_pc → NodeIndex for quick lookup
+    let mut pc_to_node: FxHashMap<usize, NodeIndex> = FxHashMap::default();
+    for node_idx in func.cfg.node_indices() {
+        let (start, _end) = func.cfg[node_idx].pc_range;
+        pc_to_node.insert(start, node_idx);
+    }
+
+    // Build a lookup for scopes with unconditional initializers.
+    // A scope initializer is "unconditional" when it's in the SAME basic block
+    // as the scope start. This means the assignment always executes before
+    // entering the scope — predecessor defs are dead.
+    //
+    // If the initializer is in a predecessor block (e.g., the else-branch of
+    // an if/else that also writes R4 in the then-branch), it's conditional
+    // and predecessor defs should still be bound.
+    let mut has_unconditional_initializer: FxHashMap<(u8, usize), bool> = FxHashMap::default();
+    for scope in scopes.all_scopes() {
+        let register = scope.register;
+        let scope_start = scope.pc_range.start;
+        // Find the block containing the scope start
+        let scope_node = find_node_containing_pc(func, scope_start);
+        if let Some(scope_node) = scope_node {
+            let (block_start, _) = func.cfg[scope_node].pc_range;
+            // Check the known initializer offsets
+            for &offset in &[1usize, 2] {
+                if scope_start >= offset {
+                    let candidate_pc = scope_start - offset;
+                    // Only count as unconditional if the initializer is in the same block
+                    if candidate_pc >= block_start {
+                        for access in accesses {
+                            if access.is_def && access.reg.register == register && access.reg.pc == candidate_pc {
+                                if def_var_has_named(def_var, func, &access.reg) {
+                                    has_unconditional_initializer.insert((register, scope_start), true);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // For each scope, find unresolved defs in predecessor blocks
+    for scope in scopes.all_scopes() {
+        let register = scope.register;
+        let scope_start = scope.pc_range.start;
+        let scope_name = &scope.name;
+
+        // If this scope has an UNCONDITIONAL initializer in the same block
+        // (bound by Phase 3a), skip predecessor binding. The initializer
+        // always overwrites the register, making predecessor writes dead.
+        //
+        // Example: `if cond then R1 = call() end; R1 = self.field`
+        // The call() result is dead — R1 is unconditionally overwritten.
+        //
+        // But if the "initializer" is in a predecessor block (conditional),
+        // we still need to bind other predecessor defs:
+        // Example: `if cond then R4 = 1 else R4 = 0 end` → both are needed.
+        if has_unconditional_initializer.contains_key(&(register, scope_start)) {
+            continue;
+        }
+
+        // Find the block that contains the scope start
+        let scope_node = find_node_containing_pc(func, scope_start);
+        let scope_node = match scope_node {
+            Some(n) => n,
+            None => continue,
+        };
+
+        // Check if there's already a VarId for this scope
+        // (reuse it if we created one in Phase 3)
+        let existing_var = find_existing_scope_var(func, register, scope_name, scope_start, def_var, accesses);
+
+        // Collect predecessor blocks
+        let preds: Vec<NodeIndex> = func.cfg
+            .neighbors_directed(scope_node, Direction::Incoming)
+            .collect();
+
+        // Only check true predecessor blocks, NOT the scope block itself.
+        // Within-block defs are already handled by Phase 3's pc+1/pc+2 lookups.
+        // Including the scope block here would incorrectly bind earlier register
+        // writes (e.g. discarded call results) to named variables.
+        for pred_node in preds {
+            let pred_block = &func.cfg[pred_node];
+            let (pred_start, pred_end) = pred_block.pc_range;
+
+            // Find the LAST def of this register in this predecessor block
+            // that is before the scope start and currently unresolved.
+            let last_def = accesses
+                .iter()
+                .filter(|a| {
+                    a.is_def
+                        && a.reg.register == register
+                        && a.reg.pc >= pred_start
+                        && a.reg.pc < pred_end
+                        && a.reg.pc < scope_start
+                        && !def_var_has_named(def_var, func, &a.reg)
+                })
+                .max_by_key(|a| a.reg.pc);
+
+            if let Some(access) = last_def {
+                // Verify no uses of this register between the def and the
+                // scope start (the value flows directly into the scope).
+                let has_intervening_use = accesses.iter().any(|a| {
+                    !a.is_def
+                        && a.reg.register == register
+                        && a.reg.pc > access.reg.pc
+                        && a.reg.pc < scope_start
+                });
+                if has_intervening_use {
+                    continue;
+                }
+
+                // Create or reuse the variable for this scope
+                let var_id = existing_var.unwrap_or_else(|| {
+                    let mut info = VarInfo::new();
+                    info.name = Some(scope_name.to_string());
+                    func.vars.alloc(info)
+                });
+
+                // Merge: if this def was assigned to an unnamed temp, reassign it
+                let info = func.vars.get_mut(var_id);
+                if !info.def_pcs.contains(&access.reg.pc) {
+                    info.def_pcs.push(access.reg.pc);
+                }
+                def_var.insert(access.reg, var_id);
+            }
+        }
+    }
+}
+
+/// Find the CFG node that contains the given PC.
+fn find_node_containing_pc(func: &HirFunc, pc: usize) -> Option<NodeIndex> {
+    for node_idx in func.cfg.node_indices() {
+        let (start, end) = func.cfg[node_idx].pc_range;
+        if pc >= start && pc < end {
+            return Some(node_idx);
+        }
+    }
+    None
+}
+
+/// Check if a def is already bound to a NAMED variable (not an unnamed temp).
+fn def_var_has_named(
+    def_var: &FxHashMap<RegRef, VarId>,
+    func: &HirFunc,
+    reg: &RegRef,
+) -> bool {
+    if let Some(&var_id) = def_var.get(reg) {
+        func.vars.get(var_id).name.is_some()
+    } else {
+        false
+    }
+}
+
+/// Find an existing VarId for a scope if one was already created in Phase 3.
+fn find_existing_scope_var(
+    func: &HirFunc,
+    register: u8,
+    scope_name: &str,
+    scope_start: usize,
+    def_var: &FxHashMap<RegRef, VarId>,
+    accesses: &[RegAccess],
+) -> Option<VarId> {
+    // Look through defs already bound to named variables for this register+scope
+    for access in accesses {
+        if access.is_def && access.reg.register == register {
+            if let Some(&var_id) = def_var.get(&access.reg) {
+                let info = func.vars.get(var_id);
+                if info.name.as_deref() == Some(scope_name) {
+                    // Check if this var was created from the same scope
+                    // (it should have def_pcs within or near the scope)
+                    if access.reg.pc >= scope_start
+                        || access.reg.pc + 3 >= scope_start
+                    {
+                        return Some(var_id);
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Rewrite all RegRef in the HIR to VarId using the resolved mappings.
