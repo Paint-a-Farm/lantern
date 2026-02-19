@@ -309,16 +309,23 @@ impl<'a> Lifter<'a> {
             }
 
             OpCode::SetTableKS => {
-                let table_expr = self.alloc_expr(HirExpr::Reg(self.reg_ref(insn.b, pc)), pc);
                 let field = self.string_from_aux(insn.aux);
                 let value = self.alloc_expr(HirExpr::Reg(self.reg_ref(insn.a, pc)), pc);
-                self.emit_stmt(HirStmt::Assign {
-                    target: LValue::Field {
-                        table: table_expr,
-                        field,
-                    },
-                    value,
-                });
+                // Try to fold into a table constructor (DUPTABLE/NEWTABLE pattern).
+                // We don't pop the value RegAssign here — it references the register
+                // directly. The value may come from an earlier multi-return Select,
+                // and popping would disrupt the Select chain for multi_return collapsing.
+                if !self.try_fold_hash_into_table(insn.b, &field, value, pc) {
+                    // Not a table constructor — emit normal field assignment
+                    let table_expr = self.alloc_expr(HirExpr::Reg(self.reg_ref(insn.b, pc)), pc);
+                    self.emit_stmt(HirStmt::Assign {
+                        target: LValue::Field {
+                            table: table_expr,
+                            field,
+                        },
+                        value,
+                    });
+                }
                 2 // AUX
             }
 
@@ -428,14 +435,34 @@ impl<'a> Lifter<'a> {
             }
 
             OpCode::SetList => {
-                // SETLIST A B C AUX: table[AUX+1..AUX+C] = R(B)..R(B+C-1)
-                // We don't restructure this into the table constructor yet —
-                // that's done in the patterns crate.
-                // Consume MULTRET top if C=0 to prevent stale state.
-                if insn.c == 0 {
-                    self.top.take();
-                }
-                // TODO: record SETLIST for pattern matching
+                // SETLIST A B C AUX: table[AUX..] = R(B)..R(B+C-2)
+                // C is count+1 (0=MULTRET). Fold elements into the Table expression.
+                let table_reg = insn.a;
+                let source_reg = insn.b;
+                let count_plus_1 = insn.c;
+
+                let elements: Vec<ExprId> = if count_plus_1 == 0 {
+                    // MULTRET: collect fixed regs + MULTRET expression
+                    self.collect_multret_args(source_reg, pc)
+                } else {
+                    let count = (count_plus_1 - 1) as u8;
+                    (0..count)
+                        .map(|i| {
+                            // Pop the RegAssign for this element register to capture
+                            // the actual value expression, removing the dead temp.
+                            self.pop_last_reg_assign(source_reg + i)
+                                .unwrap_or_else(|| {
+                                    self.alloc_expr(
+                                        HirExpr::Reg(self.reg_ref(source_reg + i, pc)),
+                                        pc,
+                                    )
+                                })
+                        })
+                        .collect()
+                };
+
+                // Find the Table expression for this register and fold elements in
+                self.fold_array_into_table(table_reg, elements);
                 2 // AUX
             }
 
@@ -1321,6 +1348,74 @@ impl<'a> Lifter<'a> {
         self.emit_assign_reg(reg, result_expr);
 
         Some(end_pc - pc)
+    }
+
+    /// Fold array elements from SETLIST into the Table expression for `table_reg`.
+    ///
+    /// Searches backwards through the current block's statements to find the
+    /// RegAssign for `table_reg` that contains a `HirExpr::Table`, then appends
+    /// the elements to its `array` field.
+    fn fold_array_into_table(&mut self, table_reg: u8, elements: Vec<ExprId>) {
+        // Find the Table expression ID assigned to this register
+        let stmts = &self.hir.cfg[self.current_block].stmts;
+        let mut table_expr_id = None;
+        for stmt in stmts.iter().rev() {
+            if let HirStmt::RegAssign { target, value } = stmt {
+                if target.register == table_reg {
+                    // Check this is actually a Table expression
+                    if matches!(self.hir.exprs.get(*value), HirExpr::Table { .. }) {
+                        table_expr_id = Some(*value);
+                    }
+                    break;
+                }
+            }
+        }
+
+        if let Some(expr_id) = table_expr_id {
+            // Mutate the Table expression in the arena to include elements
+            if let HirExpr::Table { array, .. } = self.hir.exprs.get_mut(expr_id) {
+                array.extend(elements);
+            }
+        }
+    }
+
+    /// Try to fold a SETTABLEKS assignment into a table constructor.
+    ///
+    /// If register `table_reg` was last assigned a `HirExpr::Table` (from
+    /// NEWTABLE or DUPTABLE), this adds the key-value pair to the table's
+    /// `hash` field and returns true. Otherwise returns false.
+    fn try_fold_hash_into_table(
+        &mut self,
+        table_reg: u8,
+        field: &str,
+        value: ExprId,
+        pc: usize,
+    ) -> bool {
+        // Find the Table expression ID assigned to this register
+        let stmts = &self.hir.cfg[self.current_block].stmts;
+        let mut table_expr_id = None;
+        for stmt in stmts.iter().rev() {
+            if let HirStmt::RegAssign { target, value: v } = stmt {
+                if target.register == table_reg {
+                    if matches!(self.hir.exprs.get(*v), HirExpr::Table { .. }) {
+                        table_expr_id = Some(*v);
+                    }
+                    break;
+                }
+            }
+        }
+
+        if let Some(expr_id) = table_expr_id {
+            let key = self.alloc_expr(
+                HirExpr::Literal(LuaValue::String(field.as_bytes().to_vec())),
+                pc,
+            );
+            if let HirExpr::Table { hash, .. } = self.hir.exprs.get_mut(expr_id) {
+                hash.push((key, value));
+                return true;
+            }
+        }
+        false
     }
 
     /// Pop the last RegAssign to `register` from the current block's statements.
