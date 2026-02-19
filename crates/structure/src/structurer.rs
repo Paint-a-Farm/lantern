@@ -7,7 +7,6 @@ use lantern_hir::cfg::{EdgeKind, Terminator};
 use lantern_hir::expr::HirExpr;
 use lantern_hir::func::HirFunc;
 use lantern_hir::stmt::{ElseIfClause, HirStmt, LValue};
-use lantern_hir::types::{BinOp, UnOp};
 use lantern_hir::var::VarId;
 
 /// Structure a function's CFG into nested HirStmt trees.
@@ -17,7 +16,8 @@ use lantern_hir::var::VarId;
 /// walks only the entry block's stmts recursively.
 pub fn structure_function(func: &mut HirFunc) {
     let entry = func.entry;
-    let stmts = structure_region(func, entry, None, None, &mut FxHashSet::default());
+    let mut stmts = structure_region(func, entry, None, None, &mut FxHashSet::default());
+    strip_trailing_returns(&mut stmts);
     func.cfg[entry].stmts = stmts;
     func.cfg[entry].terminator = Terminator::None;
     func.structured = true;
@@ -212,6 +212,7 @@ fn structure_branch(
                 });
             } else if elseif_clauses.is_empty() && !final_else.is_empty() {
                 if then_stmts.is_empty() {
+                    // Empty then-body → flip to `if not cond then <else> end`
                     let inv_cond = negate_condition(func, condition);
                     result.push(HirStmt::If {
                         condition: inv_cond,
@@ -219,6 +220,28 @@ fn structure_branch(
                         elseif_clauses: Vec::new(),
                         else_body: None,
                     });
+                } else if is_guard_clause(&then_stmts) && !ends_with_exit(&final_else) {
+                    // Guard clause pattern: then-body is a short early-out and
+                    // the else-body continues. Flip to:
+                    //   if not cond then <main body> end; <guard>
+                    let inv_cond = negate_condition(func, condition);
+                    result.push(HirStmt::If {
+                        condition: inv_cond,
+                        then_body: final_else,
+                        elseif_clauses: Vec::new(),
+                        else_body: None,
+                    });
+                    result.extend(then_stmts);
+                } else if is_guard_clause(&final_else) && !ends_with_exit(&then_stmts) {
+                    // Inverse guard: else-body is the early-out, then-body continues.
+                    // Emit as `if cond then <main body> end; <guard>`
+                    result.push(HirStmt::If {
+                        condition,
+                        then_body: then_stmts,
+                        elseif_clauses: Vec::new(),
+                        else_body: None,
+                    });
+                    result.extend(final_else);
                 } else {
                     result.push(HirStmt::If {
                         condition,
@@ -408,6 +431,87 @@ fn branch_always_returns(
         }
     }
     !visited.is_empty()
+}
+
+/// Recursively strip trailing bare `return` statements that are redundant.
+/// A bare `return` at the end of a function body is implicit in Lua.
+/// This also strips them from the last if/else/elseif branches when the
+/// if statement is itself the last statement in the function.
+///
+/// Only strips a bare return when the branch has other statements — a branch
+/// whose sole purpose is `return` (early exit guard) must keep it.
+fn strip_trailing_returns(stmts: &mut Vec<HirStmt>) {
+    // Strip a trailing bare return from the statement list itself
+    if matches!(stmts.last(), Some(HirStmt::Return(v)) if v.is_empty()) {
+        stmts.pop();
+    }
+
+    // If the last statement is an if, recurse into all its branches
+    if let Some(HirStmt::If {
+        then_body,
+        elseif_clauses,
+        else_body,
+        ..
+    }) = stmts.last_mut()
+    {
+        strip_trailing_return_if_not_sole(then_body);
+        for clause in elseif_clauses.iter_mut() {
+            strip_trailing_return_if_not_sole(&mut clause.body);
+        }
+        if let Some(else_body) = else_body {
+            strip_trailing_return_if_not_sole(else_body);
+        }
+    }
+}
+
+/// Strip a trailing bare return from a branch body, but only if it's not the
+/// sole statement. A branch with only `return` is an early-exit guard and
+/// must keep the return to be meaningful.
+fn strip_trailing_return_if_not_sole(stmts: &mut Vec<HirStmt>) {
+    if stmts.len() > 1 {
+        if matches!(stmts.last(), Some(HirStmt::Return(v)) if v.is_empty()) {
+            stmts.pop();
+        }
+    }
+    // Recurse into nested if as last statement
+    if let Some(HirStmt::If {
+        then_body,
+        elseif_clauses,
+        else_body,
+        ..
+    }) = stmts.last_mut()
+    {
+        strip_trailing_return_if_not_sole(then_body);
+        for clause in elseif_clauses.iter_mut() {
+            strip_trailing_return_if_not_sole(&mut clause.body);
+        }
+        if let Some(else_body) = else_body {
+            strip_trailing_return_if_not_sole(else_body);
+        }
+    }
+}
+
+/// Check if a statement list is a "guard clause" — a short block (≤3 statements)
+/// that ends with return or break. These are typically early-out checks like:
+///   if not valid then error("..."); return end
+fn is_guard_clause(stmts: &[HirStmt]) -> bool {
+    if stmts.is_empty() || stmts.len() > 3 {
+        return false;
+    }
+    matches!(
+        stmts.last(),
+        Some(HirStmt::Return { .. } | HirStmt::Break)
+    )
+}
+
+/// Check if a statement list ends with an exit (return or break).
+/// Used to distinguish symmetric if-else (both branches exit) from
+/// guard clauses (one branch exits, the other continues).
+fn ends_with_exit(stmts: &[HirStmt]) -> bool {
+    matches!(
+        stmts.last(),
+        Some(HirStmt::Return { .. } | HirStmt::Break)
+    )
 }
 
 // ---- CFG helpers ----
@@ -785,26 +889,5 @@ fn find_for_back_block(
 }
 
 fn negate_condition(func: &mut HirFunc, condition: ExprId) -> ExprId {
-    if let HirExpr::Unary { op: UnOp::Not, operand } = func.exprs.get(condition) {
-        return *operand;
-    }
-    // Invert comparisons directly instead of wrapping in not()
-    if let HirExpr::Binary { op, left, right } = func.exprs.get(condition).clone() {
-        let inv_op = match op {
-            BinOp::CompareEq => Some(BinOp::CompareNe),
-            BinOp::CompareNe => Some(BinOp::CompareEq),
-            BinOp::CompareLt => Some(BinOp::CompareGe),
-            BinOp::CompareLe => Some(BinOp::CompareGt),
-            BinOp::CompareGt => Some(BinOp::CompareLe),
-            BinOp::CompareGe => Some(BinOp::CompareLt),
-            _ => None,
-        };
-        if let Some(inv_op) = inv_op {
-            return func.exprs.alloc(HirExpr::Binary { op: inv_op, left, right });
-        }
-    }
-    func.exprs.alloc(HirExpr::Unary {
-        op: UnOp::Not,
-        operand: condition,
-    })
+    func.exprs.negate_condition(condition)
 }

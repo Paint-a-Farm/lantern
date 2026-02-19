@@ -90,12 +90,30 @@ pub fn recover_variables(func: &mut HirFunc, scopes: &ScopeTree, num_params: u8)
             // instruction AFTER the defining instruction. Try pc+1 first.
             // For AUX-word instructions (NewTable, GetImport, etc.) that
             // occupy 2 slots, the scope may start at pc+2 — but only if
-            // a scope actually STARTS there (not just contains it).
+            // a scope actually STARTS there (not just contains it) AND
+            // the access is flagged as having an AUX word.
             let scope = find_scope(scopes, register, access.reg.pc)
                 .or_else(|| {
                     if access.is_def {
                         find_scope(scopes, register, access.reg.pc + 1)
-                            .or_else(|| find_scope_starting_at(scopes, register, access.reg.pc + 2))
+                            .or_else(|| find_scope_starting_at(scopes, register, access.reg.pc + 1))
+                            .or_else(|| {
+                                if access.has_aux {
+                                    find_scope_starting_at(scopes, register, access.reg.pc + 2)
+                                } else {
+                                    None
+                                }
+                            })
+                            // Table constructor pattern: DupTable/NewTable at PC X, followed
+                            // by SETTABLEKS field assignments, with the scope starting after
+                            // all fields are set. Only for table constructor defs.
+                            .or_else(|| {
+                                if access.is_table_def {
+                                    find_next_scope_after(scopes, register, access.reg.pc, reg_accesses)
+                                } else {
+                                    None
+                                }
+                            })
                     } else {
                         None
                     }
@@ -214,6 +232,53 @@ fn find_scope_starting_at(scopes: &ScopeTree, register: u8, pc: usize) -> Option
         }
     }
     None
+}
+
+/// Find the scope for a register that starts after the given PC,
+/// but ONLY when the def is the FIRST def of this register.
+/// This handles the table constructor pattern: DupTable/NewTable defines the register
+/// at PC X, followed by SETTABLEKS field assignments, with the scope starting after
+/// all fields are set. The bytecode compiler delays the scope start until after
+/// the full constructor. We only match the first def because later defs of
+/// the same register are likely temporaries reusing a register slot.
+fn find_next_scope_after<'a>(
+    scopes: &'a ScopeTree,
+    register: u8,
+    pc: usize,
+    reg_accesses: &[&RegAccess],
+) -> Option<(&'a str, usize)> {
+    // Check if this is the first def of this register
+    let first_def_pc = reg_accesses
+        .iter()
+        .filter(|a| a.is_def)
+        .map(|a| a.reg.pc)
+        .min();
+    if first_def_pc != Some(pc) {
+        return None;
+    }
+
+    // Find the nearest scope starting after this PC
+    let mut best: Option<(&str, usize)> = None;
+    for scope in scopes.scopes_for_register(register) {
+        if scope.pc_range.start > pc {
+            if best.map_or(true, |(_, s)| scope.pc_range.start < s) {
+                best = Some((&scope.name, scope.pc_range.start));
+            }
+        }
+    }
+
+    // Safety check: no other defs of this register between the def and
+    // scope start (register reuse as temporary).
+    if let Some((_, scope_start)) = best {
+        let has_intervening_defs = reg_accesses
+            .iter()
+            .any(|a| a.is_def && a.reg.pc > pc && a.reg.pc < scope_start);
+        if has_intervening_defs {
+            return None;
+        }
+    }
+
+    best
 }
 
 /// Rewrite all RegRef in the HIR to VarId using the resolved mappings.

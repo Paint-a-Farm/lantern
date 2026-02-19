@@ -80,4 +80,43 @@ impl ExprArena {
     pub fn is_empty(&self) -> bool {
         self.exprs.is_empty()
     }
+
+    /// Negate a condition expression, producing the logical inverse.
+    ///
+    /// Applies simplifications:
+    /// - `not (not x)` → `x` (double negation elimination)
+    /// - `a == b` → `a ~= b` (comparison inversion)
+    /// - `a < b` → `a >= b`, etc.
+    /// - Otherwise wraps in `not(expr)`
+    pub fn negate_condition(&mut self, condition: ExprId) -> ExprId {
+        use crate::expr::HirExpr;
+        use crate::types::{BinOp, UnOp};
+
+        // Double negation: not(not x) → x
+        if let HirExpr::Unary { op: UnOp::Not, operand } = self.get(condition) {
+            return *operand;
+        }
+
+        // Comparison inversion
+        if let HirExpr::Binary { op, left, right } = self.get(condition).clone() {
+            let inv_op = match op {
+                BinOp::CompareEq => Some(BinOp::CompareNe),
+                BinOp::CompareNe => Some(BinOp::CompareEq),
+                BinOp::CompareLt => Some(BinOp::CompareGe),
+                BinOp::CompareLe => Some(BinOp::CompareGt),
+                BinOp::CompareGt => Some(BinOp::CompareLe),
+                BinOp::CompareGe => Some(BinOp::CompareLt),
+                _ => None,
+            };
+            if let Some(inv_op) = inv_op {
+                return self.alloc(HirExpr::Binary { op: inv_op, left, right });
+            }
+        }
+
+        // Fallback: wrap in not()
+        self.alloc(HirExpr::Unary {
+            op: UnOp::Not,
+            operand: condition,
+        })
+    }
 }

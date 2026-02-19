@@ -919,8 +919,16 @@ impl<'a> LuaEmitter<'a> {
             LuaValue::Boolean(true) => self.output.push_str("true"),
             LuaValue::Boolean(false) => self.output.push_str("false"),
             LuaValue::Number(n) => {
-                // Format integers without decimal point
-                if n.fract() == 0.0 && n.abs() < 1e15 {
+                if n.is_infinite() {
+                    if n.is_sign_positive() {
+                        self.output.push_str("math.huge");
+                    } else {
+                        self.output.push_str("-math.huge");
+                    }
+                } else if n.is_nan() {
+                    self.output.push_str("(0/0)");
+                } else if n.fract() == 0.0 && n.abs() < 1e15 {
+                    // Format integers without decimal point
                     let _ = write!(self.output, "{}", *n as i64);
                 } else {
                     let _ = write!(self.output, "{}", n);
@@ -1059,7 +1067,15 @@ impl<'a> LuaEmitter<'a> {
             HirExpr::Literal(lit) => {
                 match lit {
                     LuaValue::String(s) => Some(format!("\"{}\"", String::from_utf8_lossy(s))),
-                    LuaValue::Number(n) => Some(format!("{}", n)),
+                    LuaValue::Number(n) => {
+                        if n.is_infinite() {
+                            Some(if n.is_sign_positive() { "math.huge".to_string() } else { "-math.huge".to_string() })
+                        } else if n.is_nan() {
+                            Some("(0/0)".to_string())
+                        } else {
+                            Some(format!("{}", n))
+                        }
+                    }
                     LuaValue::Boolean(b) => Some(format!("{}", b)),
                     LuaValue::Nil => Some("nil".to_string()),
                     _ => None,

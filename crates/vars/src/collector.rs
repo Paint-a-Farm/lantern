@@ -10,6 +10,12 @@ use lantern_hir::var::RegRef;
 pub struct RegAccess {
     pub reg: RegRef,
     pub is_def: bool,
+    /// True if this access comes from an instruction that has an AUX word
+    /// (occupying 2 PC slots). Used to correctly match scope boundaries.
+    pub has_aux: bool,
+    /// True if this def assigns a table constructor (Table expression).
+    /// Used to enable the delayed-scope matching for table constructors.
+    pub is_table_def: bool,
 }
 
 /// Collect all register accesses from a function's HIR.
@@ -36,10 +42,13 @@ pub fn collect_accesses(func: &HirFunc) -> Vec<RegAccess> {
 fn collect_from_stmt(func: &HirFunc, stmt: &HirStmt, out: &mut Vec<RegAccess>) {
     match stmt {
         HirStmt::RegAssign { target, value } => {
-            // target is a def
+            // target is a def — propagate has_aux from the RegRef
+            let is_table_def = matches!(func.exprs.get(*value), HirExpr::Table { .. });
             out.push(RegAccess {
                 reg: *target,
                 is_def: true,
+                has_aux: target.has_aux,
+                is_table_def,
             });
             // value may contain uses
             collect_from_expr(func, *value, out);
@@ -197,6 +206,8 @@ fn collect_from_expr(func: &HirFunc, expr_id: ExprId, out: &mut Vec<RegAccess>) 
             out.push(RegAccess {
                 reg: *reg,
                 is_def: false,
+                has_aux: reg.has_aux,
+                is_table_def: false,
             });
         }
         HirExpr::FieldAccess { table, .. } => {
@@ -257,6 +268,8 @@ fn collect_from_expr(func: &HirFunc, expr_id: ExprId, out: &mut Vec<RegAccess>) 
                     out.push(RegAccess {
                         reg: *reg,
                         is_def: false,
+                        has_aux: reg.has_aux,
+                        is_table_def: false,
                     });
                 }
             }

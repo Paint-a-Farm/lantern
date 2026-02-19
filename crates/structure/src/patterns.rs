@@ -12,7 +12,7 @@
 use lantern_hir::expr::HirExpr;
 use lantern_hir::func::HirFunc;
 use lantern_hir::stmt::{ElseIfClause, HirStmt, LValue};
-use lantern_hir::types::{BinOp, UnOp};
+use lantern_hir::types::BinOp;
 
 /// Apply all post-structuring patterns to the function.
 pub fn apply_patterns(func: &mut HirFunc) {
@@ -67,9 +67,10 @@ fn transform_stmt(func: &mut HirFunc, stmt: HirStmt) -> HirStmt {
                 else_body,
             };
 
-            // Apply patterns (order matters — normalize first, then merge)
+            // Apply patterns (order matters — normalize first, then merge, then flip guards)
             if_stmt = normalize_inverted_elseif(func, if_stmt);
             if_stmt = merge_compound_conditions(func, if_stmt);
+            if_stmt = flip_elseif_guard(func, if_stmt);
 
             if_stmt
         }
@@ -335,40 +336,70 @@ fn merge_compound_conditions(func: &mut HirFunc, stmt: HirStmt) -> HirStmt {
     }
 }
 
-fn negate_condition(func: &mut HirFunc, condition: lantern_hir::arena::ExprId) -> lantern_hir::arena::ExprId {
-    // If already `not X`, just return X (double negation elimination)
-    if let HirExpr::Unary {
-        op: UnOp::Not,
-        operand,
-    } = func.exprs.get(condition)
-    {
-        return *operand;
-    }
+/// Flip the last elseif clause when it's a guard (short + ends with return/break)
+/// and the else body has real code. This converts:
+/// ```text
+/// if A then ...
+/// elseif B then return       -->   if A then ...
+/// else <code> end                  elseif not B then <code> end
+/// ```
+fn flip_elseif_guard(func: &mut HirFunc, stmt: HirStmt) -> HirStmt {
+    let HirStmt::If {
+        condition,
+        then_body,
+        mut elseif_clauses,
+        else_body,
+    } = stmt
+    else {
+        return stmt;
+    };
 
-    // For comparisons, invert the operator
-    if let HirExpr::Binary { op, left, right } = func.exprs.get(condition).clone() {
-        let inv_op = match op {
-            BinOp::CompareEq => Some(BinOp::CompareNe),
-            BinOp::CompareNe => Some(BinOp::CompareEq),
-            BinOp::CompareLt => Some(BinOp::CompareGe),
-            BinOp::CompareLe => Some(BinOp::CompareGt),
-            BinOp::CompareGt => Some(BinOp::CompareLe),
-            BinOp::CompareGe => Some(BinOp::CompareLt),
-            _ => None,
-        };
-        if let Some(inv_op) = inv_op {
-            return func.exprs.alloc(HirExpr::Binary {
-                op: inv_op,
-                left,
-                right,
-            });
+    let Some(ref else_body_stmts) = else_body else {
+        return HirStmt::If { condition, then_body, elseif_clauses, else_body };
+    };
+
+    // Check if the last elseif (or the then-body if no elseifs) is a guard
+    if let Some(last_clause) = elseif_clauses.last_mut() {
+        if is_short_guard(&last_clause.body) && !ends_with_exit(else_body_stmts) {
+            let guard_stmts = std::mem::replace(&mut last_clause.body, else_body.unwrap());
+            last_clause.condition = negate_condition(func, last_clause.condition);
+            // The guard stmts (e.g. just `return`) become trailing statements
+            // after the if — but since we're inside an if statement, we need to
+            // check if there are more elseif clauses that would make this invalid.
+            // Actually, the guard was the LAST clause, so we can just drop the else
+            // and the guard will be implicit at end of function.
+            // But to be safe, if the guard has actual content beyond return, keep it.
+            if guard_stmts.len() == 1 && matches!(guard_stmts[0], HirStmt::Return(ref v) if v.is_empty()) {
+                // Just a bare return — drop it, the function will return implicitly
+                return HirStmt::If { condition, then_body, elseif_clauses, else_body: None };
+            }
+            // Guard has content (e.g., `error(); return`) — keep as else
+            return HirStmt::If { condition, then_body, elseif_clauses, else_body: Some(guard_stmts) };
         }
+    } else if is_short_guard(&then_body) && !ends_with_exit(else_body_stmts) {
+        // No elseif clauses — just then-body is a guard with else having real code.
+        // This is already handled by the structurer, but handle it here too for safety.
+        return HirStmt::If { condition, then_body, elseif_clauses, else_body };
     }
 
-    func.exprs.alloc(HirExpr::Unary {
-        op: UnOp::Not,
-        operand: condition,
-    })
+    HirStmt::If { condition, then_body, elseif_clauses, else_body }
+}
+
+/// Check if a statement list is a short guard clause (≤3 statements ending with return/break).
+fn is_short_guard(stmts: &[HirStmt]) -> bool {
+    if stmts.is_empty() || stmts.len() > 3 {
+        return false;
+    }
+    matches!(stmts.last(), Some(HirStmt::Return { .. } | HirStmt::Break))
+}
+
+/// Check if a statement list ends with an exit (return or break).
+fn ends_with_exit(stmts: &[HirStmt]) -> bool {
+    matches!(stmts.last(), Some(HirStmt::Return { .. } | HirStmt::Break))
+}
+
+fn negate_condition(func: &mut HirFunc, condition: lantern_hir::arena::ExprId) -> lantern_hir::arena::ExprId {
+    func.exprs.negate_condition(condition)
 }
 
 /// Negate a condition, applying De Morgan's law to `or` chains.

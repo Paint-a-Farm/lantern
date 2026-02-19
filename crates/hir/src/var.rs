@@ -11,6 +11,9 @@ pub struct VarId(pub u32);
 pub struct RegRef {
     pub register: u8,
     pub pc: usize,
+    /// True if this instruction has an AUX word (occupies 2 PC slots).
+    /// The debug scope for such instructions starts at pc+2, not pc+1.
+    pub has_aux: bool,
 }
 
 /// Metadata about a single variable after recovery.

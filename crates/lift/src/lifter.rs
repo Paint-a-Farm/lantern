@@ -54,6 +54,8 @@ struct Lifter<'a> {
     truthy_chains: Vec<crate::bool_regions::TruthyChain>,
     /// Compound `a and b or c` ternary expressions.
     and_or_ternaries: Vec<crate::bool_regions::AndOrTernary>,
+    /// Simple conditional value ternaries (JumpIfNot + value + Jump + value).
+    value_ternaries: Vec<crate::bool_regions::ValueTernary>,
 }
 
 impl<'a> Lifter<'a> {
@@ -88,6 +90,7 @@ impl<'a> Lifter<'a> {
             bool_regions: Vec::new(),
             truthy_chains: Vec::new(),
             and_or_ternaries: Vec::new(),
+            value_ternaries: Vec::new(),
         }
     }
 
@@ -112,7 +115,7 @@ impl<'a> Lifter<'a> {
 
         // Detect truthiness-based or/and chains (JUMPIF/JUMPIFNOT)
         // Skip chains that overlap with already-detected and/or ternaries
-        let (truthy_chains, truthy_suppressed) =
+        let (truthy_chains, _truthy_suppressed) =
             crate::bool_regions::detect_truthy_chains(instructions);
         // Filter out chains whose jumps are already suppressed by ternaries
         self.truthy_chains = truthy_chains.into_iter().filter(|chain| {
@@ -122,6 +125,18 @@ impl<'a> Lifter<'a> {
             for &jump_pc in &chain.jump_pcs {
                 suppressed.insert(jump_pc);
             }
+        }
+
+        // Detect simple conditional value ternaries (JumpIfNot + value + Jump + value)
+        // Skip ternaries whose jumps are already suppressed
+        let (value_ternaries, _value_suppressed) =
+            crate::bool_regions::detect_value_ternaries(instructions);
+        self.value_ternaries = value_ternaries.into_iter().filter(|t| {
+            !suppressed.contains(&t.jump_pc) && !suppressed.contains(&t.skip_jump_pc)
+        }).collect();
+        for t in &self.value_ternaries {
+            suppressed.insert(t.jump_pc);
+            suppressed.insert(t.skip_jump_pc);
         }
 
         // Discover block boundaries
@@ -161,6 +176,11 @@ impl<'a> Lifter<'a> {
             }
             // Check if this PC starts a truthiness-based or/and chain.
             if let Some(advance) = self.try_lift_truthy_chain(pc) {
+                pc += advance;
+                continue;
+            }
+            // Check if this PC starts a simple conditional value ternary.
+            if let Some(advance) = self.try_lift_value_ternary(pc) {
                 pc += advance;
                 continue;
             }
@@ -646,23 +666,37 @@ impl<'a> Lifter<'a> {
             }
 
             // Conditional branches
+            //
+            // Convention: fallthrough = then-edge, target = else-edge.
+            // The Luau compiler deterministically chooses opcode polarity:
+            //   `if cond then`     → JumpIfNot (skip then-body when falsy)
+            //   `if not cond then` → JumpIf    (skip then-body when truthy)
+            // So we can recover the original condition polarity from the opcode.
+            // The condition is the INVERSE of the jump test.
             OpCode::JumpIf => {
-                let cond = self.alloc_expr(HirExpr::Reg(self.reg_ref(insn.a, pc)), pc);
+                // JumpIf = jump when truthy → original source had `if not cond then`
+                let inner = self.alloc_expr(HirExpr::Reg(self.reg_ref(insn.a, pc)), pc);
+                let cond = self.alloc_expr(HirExpr::Unary { op: UnOp::Not, operand: inner }, pc);
                 let target = ((pc + 1) as i64 + insn.d as i64) as usize;
-                self.emit_branch(cond, target, pc + 1);
+                self.emit_branch(cond, pc + 1, target);
                 1
             }
 
             OpCode::JumpIfNot => {
-                // JumpIfNot: jump if falsy. We negate: branch true = fallthrough, false = target
-                let inner = self.alloc_expr(HirExpr::Reg(self.reg_ref(insn.a, pc)), pc);
-                let cond = self.alloc_expr(HirExpr::Unary { op: UnOp::Not, operand: inner }, pc);
+                // JumpIfNot = jump when falsy → original source had `if cond then`
+                let cond = self.alloc_expr(HirExpr::Reg(self.reg_ref(insn.a, pc)), pc);
                 let target = ((pc + 1) as i64 + insn.d as i64) as usize;
-                self.emit_branch(cond, target, pc + 1);
+                self.emit_branch(cond, pc + 1, target);
                 1
             }
 
             // Comparison jumps (with AUX)
+            //
+            // Same convention: fallthrough = then-edge, target = else-edge.
+            // The compiler uses the "Not" variant to skip past the then-body:
+            //   `if a == b then` → JumpIfNotEq (skip when not equal)
+            //   `if a ~= b then` → JumpIfEq   (skip when equal)
+            // The condition is the inverse of the jump test.
             OpCode::JumpIfEq
             | OpCode::JumpIfLe
             | OpCode::JumpIfLt
@@ -671,27 +705,35 @@ impl<'a> Lifter<'a> {
             | OpCode::JumpIfNotLt => {
                 let left = self.alloc_expr(HirExpr::Reg(self.reg_ref(insn.a, pc)), pc);
                 let right = self.alloc_expr(
-                    HirExpr::Reg(RegRef { register: insn.aux as u8, pc }),
+                    HirExpr::Reg(RegRef { register: insn.aux as u8, pc, has_aux: false }),
                     pc,
                 );
 
+                // Invert: the condition is what makes you NOT jump (= stay in then-body)
                 let op = match insn.op {
-                    OpCode::JumpIfEq => BinOp::CompareEq,
-                    OpCode::JumpIfLe => BinOp::CompareLe,
-                    OpCode::JumpIfLt => BinOp::CompareLt,
-                    OpCode::JumpIfNotEq => BinOp::CompareNe,
-                    OpCode::JumpIfNotLe => BinOp::CompareGt, // not(a<=b) = a>b
-                    OpCode::JumpIfNotLt => BinOp::CompareGe, // not(a<b) = a>=b
+                    OpCode::JumpIfNotEq => BinOp::CompareEq,   // source: if a == b
+                    OpCode::JumpIfNotLe => BinOp::CompareLe,   // source: if a <= b
+                    OpCode::JumpIfNotLt => BinOp::CompareLt,   // source: if a < b
+                    OpCode::JumpIfEq => BinOp::CompareNe,      // source: if a ~= b
+                    OpCode::JumpIfLe => BinOp::CompareGt,      // source: if a > b
+                    OpCode::JumpIfLt => BinOp::CompareGe,      // source: if a >= b
                     _ => unreachable!(),
                 };
 
                 let cond = self.alloc_expr(HirExpr::Binary { op, left, right }, pc);
                 let target = ((pc + 1) as i64 + insn.d as i64) as usize;
-                self.emit_branch(cond, target, pc + 2);
+                self.emit_branch(cond, pc + 2, target);
                 2 // AUX
             }
 
-            // Constant comparison jumps
+            // Constant comparison jumps (JumpXEqK*)
+            //
+            // Same convention: fallthrough = then, target = else.
+            // not_flag=0: jump when == (source had `if ~= then`), condition = ~=
+            // not_flag=1: jump when ~= (source had `if == then`), condition = ==
+            // Wait — this is opposite. not_flag inverts the comparison:
+            //   not_flag=0: jump if equal     → source had `if x ~= K then`
+            //   not_flag=1: jump if not-equal → source had `if x == K then`
             OpCode::JumpXEqKNil | OpCode::JumpXEqKB | OpCode::JumpXEqKN | OpCode::JumpXEqKS => {
                 let left = self.alloc_expr(HirExpr::Reg(self.reg_ref(insn.a, pc)), pc);
                 let not_flag = (insn.aux >> 31) != 0;
@@ -711,12 +753,14 @@ impl<'a> Lifter<'a> {
                 };
 
                 let right = self.alloc_expr(HirExpr::Literal(right_val), pc);
-                let base_op = BinOp::CompareEq;
-                let op = if not_flag { BinOp::CompareNe } else { base_op };
+                // Invert: condition is what keeps us in fallthrough (then-body)
+                // not_flag=0 → jump when equal → condition is ~= (stay when not equal)
+                // not_flag=1 → jump when not-equal → condition is == (stay when equal)
+                let op = if not_flag { BinOp::CompareEq } else { BinOp::CompareNe };
 
                 let cond = self.alloc_expr(HirExpr::Binary { op, left, right }, pc);
                 let target = ((pc + 1) as i64 + insn.d as i64) as usize;
-                self.emit_branch(cond, target, pc + 2);
+                self.emit_branch(cond, pc + 2, target);
                 2 // AUX
             }
 
@@ -981,7 +1025,7 @@ impl<'a> Lifter<'a> {
     // ---- Helpers ----
 
     fn reg_ref(&self, register: u8, pc: usize) -> RegRef {
-        RegRef { register, pc }
+        RegRef { register, pc, has_aux: self.func.instructions.get(pc).map_or(false, |i| i.op.has_aux()) }
     }
 
     fn alloc_expr(&mut self, expr: HirExpr, pc: usize) -> ExprId {
@@ -1284,7 +1328,11 @@ impl<'a> Lifter<'a> {
         };
 
         // Emit the assignment: result_reg = <compound boolean expression>
-        let reg = self.reg_ref(result_reg, false_pc);
+        // Use end_pc - 1 (the true LoadB) as the def PC, so that pc+1 = end_pc
+        // matches the scope start for the variable being assigned. Using false_pc
+        // would be 2 PCs before the scope start, missing the +1 lookup.
+        let def_pc = end_pc - 1;
+        let reg = self.reg_ref(result_reg, def_pc);
         self.emit_assign_reg(reg, result_expr);
 
         // Return PCs consumed: from start through the LOADB true at true_pc
@@ -1485,6 +1533,82 @@ impl<'a> Lifter<'a> {
         Some(join_pc - pc)
     }
 
+    /// Try to lift a simple conditional value ternary starting at `pc`.
+    ///
+    /// Pattern:
+    /// ```text
+    /// JumpIfNot Ra, +N         → false_val_pc
+    /// [load true value into Rb]
+    /// Jump +M                  → join_pc
+    /// [load false value into Rb]  ← false_val_pc
+    /// <join>                      ← join_pc
+    /// ```
+    ///
+    /// Produces: `Rb = Ra and true_val or false_val`
+    fn try_lift_value_ternary(&mut self, pc: usize) -> Option<usize> {
+        let idx = self.value_ternaries.iter().position(|t| t.jump_pc == pc)?;
+
+        let jump_pc = self.value_ternaries[idx].jump_pc;
+        let skip_jump_pc = self.value_ternaries[idx].skip_jump_pc;
+        let false_val_pc = self.value_ternaries[idx].false_val_pc;
+        let join_pc = self.value_ternaries[idx].join_pc;
+        let cond_reg = self.value_ternaries[idx].cond_reg;
+        let result_reg = self.value_ternaries[idx].result_reg;
+
+        // The condition operand: value in cond_reg was loaded by instructions
+        // already lifted before this PC. Pop the last RegAssign to cond_reg.
+        let cond_operand = self.pop_last_reg_assign(cond_reg).unwrap_or_else(|| {
+            self.alloc_expr(HirExpr::Reg(self.reg_ref(cond_reg, pc)), pc)
+        });
+
+        // Lift the true-value instructions (between jump_pc+1 and skip_jump_pc)
+        let true_start = jump_pc + 1;
+        let mut seg_pc = true_start;
+        while seg_pc < skip_jump_pc {
+            let insn = &self.func.instructions[seg_pc];
+            let advance = self.lift_instruction(insn, seg_pc);
+            seg_pc += advance;
+        }
+        let true_operand = self.pop_last_reg_assign(result_reg).unwrap_or_else(|| {
+            self.alloc_expr(HirExpr::Reg(self.reg_ref(result_reg, skip_jump_pc)), skip_jump_pc)
+        });
+
+        // Lift the false-value instructions (between false_val_pc and join_pc)
+        seg_pc = false_val_pc;
+        while seg_pc < join_pc {
+            let insn = &self.func.instructions[seg_pc];
+            let advance = self.lift_instruction(insn, seg_pc);
+            seg_pc += advance;
+        }
+        let false_operand = self.pop_last_reg_assign(result_reg).unwrap_or_else(|| {
+            self.alloc_expr(HirExpr::Reg(self.reg_ref(result_reg, false_val_pc)), false_val_pc)
+        });
+
+        // Build: cond and true_val or false_val
+        let and_expr = self.alloc_expr(
+            HirExpr::Binary {
+                op: BinOp::And,
+                left: cond_operand,
+                right: true_operand,
+            },
+            pc,
+        );
+        let result_expr = self.alloc_expr(
+            HirExpr::Binary {
+                op: BinOp::Or,
+                left: and_expr,
+                right: false_operand,
+            },
+            pc,
+        );
+
+        // Emit: result_reg = cond and true_val or false_val
+        let reg = self.reg_ref(result_reg, pc);
+        self.emit_assign_reg(reg, result_expr);
+
+        Some(join_pc - pc)
+    }
+
     /// Fold array elements from SETLIST into the Table expression for `table_reg`.
     ///
     /// Searches backwards through the current block's statements to find the
@@ -1587,7 +1711,7 @@ impl<'a> Lifter<'a> {
             | OpCode::JumpIfNotLt => {
                 let left = self.alloc_expr(HirExpr::Reg(self.reg_ref(insn.a, pc)), pc);
                 let right = self.alloc_expr(
-                    HirExpr::Reg(RegRef { register: insn.aux as u8, pc }),
+                    HirExpr::Reg(RegRef { register: insn.aux as u8, pc, has_aux: false }),
                     pc,
                 );
 
@@ -1654,21 +1778,7 @@ impl<'a> Lifter<'a> {
 
     /// Negate a comparison expression (flip Eq↔Ne, Lt↔Ge, Le↔Gt).
     /// Used when a JumpXEqK* bail-out jump in an AND chain needs inversion.
-    fn negate_comparison(&mut self, expr_id: ExprId, pc: usize) -> ExprId {
-        let expr = self.hir.exprs.get(expr_id).clone();
-        if let HirExpr::Binary { op, left, right } = expr {
-            let negated_op = match op {
-                BinOp::CompareEq => BinOp::CompareNe,
-                BinOp::CompareNe => BinOp::CompareEq,
-                BinOp::CompareLt => BinOp::CompareGe,
-                BinOp::CompareLe => BinOp::CompareGt,
-                BinOp::CompareGe => BinOp::CompareLt,
-                BinOp::CompareGt => BinOp::CompareLe,
-                _ => return expr_id, // non-comparison, don't negate
-            };
-            self.alloc_expr(HirExpr::Binary { op: negated_op, left, right }, pc)
-        } else {
-            expr_id
-        }
+    fn negate_comparison(&mut self, expr_id: ExprId, _pc: usize) -> ExprId {
+        self.hir.exprs.negate_condition(expr_id)
     }
 }

@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use lantern_hir::timing::{self, FileTimings, FuncTimings, PipelineReport, PHASE_EMIT, PHASE_EXPRS, PHASE_LIFT, PHASE_PATTERNS, PHASE_STRUCTURE, PHASE_VARS};
 
@@ -16,6 +16,7 @@ fn main() {
     let mut raw_mode = false;
     let mut no_format = false;
     let mut dump_bc = false;
+    let mut output_dir: Option<String> = None;
     let mut paths = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -30,6 +31,10 @@ fn main() {
             no_format = true;
         } else if args[i] == "--dump" {
             dump_bc = true;
+        } else if args[i] == "--output-dir" {
+            i += 1;
+            output_dir = Some(args[i].clone());
+            file_mode = true; // --output-dir implies --file
         } else {
             paths.push(args[i].clone());
         }
@@ -49,10 +54,26 @@ fn main() {
     expanded_paths.sort();
     let paths = expanded_paths;
 
-    let verbose = paths.len() == 1;
-    let mut report = PipelineReport::new();
+    // Determine base directory for relative path computation when using --output-dir
+    let base_dir: Option<PathBuf> = output_dir.as_ref().map(|_| {
+        // Use the first input path's parent as the base for relative paths
+        let first = Path::new(&paths[0]);
+        if first.is_dir() {
+            first.to_path_buf()
+        } else {
+            first.parent().unwrap_or(Path::new(".")).to_path_buf()
+        }
+    });
 
-    for path in &paths {
+    let verbose = paths.len() == 1 && output_dir.is_none();
+    let mut report = PipelineReport::new();
+    let total_files = paths.len();
+
+    for (file_idx, path) in paths.iter().enumerate() {
+        if output_dir.is_some() && total_files > 1 {
+            eprint!("\r[{}/{}] {}                    ", file_idx + 1, total_files, path);
+        }
+
         let data = match fs::read(path) {
             Ok(d) => d,
             Err(e) => {
@@ -239,7 +260,28 @@ fn main() {
             } else {
                 timing::timed(|| format_luau(&lua_source, path))
             };
-            print!("{}", output);
+
+            if let Some(ref out_dir) = output_dir {
+                // Write to output directory, preserving relative path structure
+                let src_path = Path::new(path);
+                let rel = if let Some(ref base) = base_dir {
+                    src_path.strip_prefix(base).unwrap_or(src_path.file_name().map(Path::new).unwrap_or(src_path))
+                } else {
+                    src_path
+                };
+                let mut out_path = PathBuf::from(out_dir);
+                out_path.push(rel);
+                out_path.set_extension("lua");
+                if let Some(parent) = out_path.parent() {
+                    fs::create_dir_all(parent).ok();
+                }
+                match fs::write(&out_path, &output) {
+                    Ok(_) => {}
+                    Err(e) => eprintln!("Error writing {}: {}", out_path.display(), e),
+                }
+            } else {
+                print!("{}", output);
+            }
             if verbose {
                 eprintln!("-- file emit: {:.2?}, format: {:.2?} --", emit_duration, format_duration);
             }
@@ -253,6 +295,10 @@ fn main() {
         report.add(file_timings);
     }
 
+    if output_dir.is_some() && total_files > 1 {
+        eprintln!(); // newline after progress counter
+    }
+
     report.print_summary();
 
     if report.total_functions() > 10 {
@@ -263,6 +309,9 @@ fn main() {
 fn format_luau(code: &str, path: &str) -> String {
     let mut config = stylua_lib::Config::new();
     config.syntax = stylua_lib::LuaVersion::Luau;
+    config.indent_type = stylua_lib::IndentType::Tabs;
+    config.indent_width = 4;
+    config.column_width = 999;
     match stylua_lib::format_code(code, config, None, stylua_lib::OutputVerification::None) {
         Ok(formatted) => formatted,
         Err(e) => {

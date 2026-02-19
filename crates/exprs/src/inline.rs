@@ -46,13 +46,18 @@ fn inline_pass(func: &mut HirFunc) -> usize {
             } = stmt
             {
                 let info = func.vars.get(*var_id);
+                let has_name = info.name.is_some();
+                let is_closure = matches!(func.exprs.get(*value), HirExpr::Closure { .. });
 
-                // Must be unnamed (no debug name) — it's a compiler temporary
-                if info.name.is_some() {
+                // Named variables are generally kept (not inlined), except:
+                // - Closures with exactly 1 use can be inlined at the call site
+                //   (e.g., `local sort = function(a,b) ... end; table.sort(t, sort)`
+                //   → `table.sort(t, function(a,b) ... end)`)
+                let uses = use_counts.get(var_id).copied().unwrap_or(0);
+
+                if has_name && !(is_closure && uses == 1) {
                     continue;
                 }
-
-                let uses = use_counts.get(var_id).copied().unwrap_or(0);
 
                 if uses == 0 {
                     if !expr_has_side_effects(func, *value) {
