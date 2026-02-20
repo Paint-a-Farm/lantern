@@ -49,6 +49,10 @@ pub fn conditional_jump_target(insn: &Instruction, pc: usize) -> Option<usize> {
 /// Call is NOT a barrier — `a or func()` is valid Lua. The call is the value
 /// producer in the chain tail. Side-effect-only instructions (SetTable, Return,
 /// etc.) remain barriers because they indicate control flow, not value expressions.
+///
+/// SetList is NOT a barrier — it populates a table created by NewTable as part
+/// of a table literal value (e.g. `a or {1, 2, 3}`). The NewTable writes the
+/// chain register and SetList fills it.
 pub fn is_chain_barrier(insn: &Instruction) -> bool {
     matches!(
         insn.op,
@@ -58,7 +62,6 @@ pub fn is_chain_barrier(insn: &Instruction) -> bool {
             | OpCode::SetTable
             | OpCode::SetTableKS
             | OpCode::SetTableN
-            | OpCode::SetList
             | OpCode::Jump
             | OpCode::JumpBack
             | OpCode::ForNPrep
