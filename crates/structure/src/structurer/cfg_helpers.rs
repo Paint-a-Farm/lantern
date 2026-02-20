@@ -41,15 +41,20 @@ pub(super) fn find_join_point(
     let then_reachable = collect_reachable(&func.cfg, then_node, outer_stop);
     let else_reachable = collect_reachable(&func.cfg, else_node, outer_stop);
 
+    // A terminal block (e.g. Return with no outgoing edges) is a
+    // destination, not a convergence point.  Treating it as a join causes
+    // the structurer to produce empty if-then-end with the body spilling
+    // after the `end`.  Filter terminals from all join candidates.
     let mut common: Vec<NodeIndex> = then_reachable
         .intersection(&else_reachable)
         .copied()
+        .filter(|n| has_forward_successors(&func.cfg, *n))
         .collect();
 
-    if then_reachable.contains(&else_node) {
+    if then_reachable.contains(&else_node) && has_forward_successors(&func.cfg, else_node) {
         common.push(else_node);
     }
-    if else_reachable.contains(&then_node) {
+    if else_reachable.contains(&then_node) && has_forward_successors(&func.cfg, then_node) {
         common.push(then_node);
     }
 
@@ -80,6 +85,12 @@ pub(super) fn collect_reachable(
         }
     }
     visited
+}
+
+/// Check if a node has at least one non-LoopBack outgoing edge.
+fn has_forward_successors(cfg: &CfgGraph, node: NodeIndex) -> bool {
+    cfg.edges(node)
+        .any(|e| e.weight().kind != EdgeKind::LoopBack)
 }
 
 pub(super) fn negate_condition(func: &mut HirFunc, condition: ExprId) -> ExprId {

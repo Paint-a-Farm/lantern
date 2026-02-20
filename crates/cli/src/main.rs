@@ -336,8 +336,10 @@ fn format_luau(code: &str, path: &str) -> String {
 fn dump_cfg_blocks(hir: &lantern_hir::func::HirFunc) {
     for node in hir.cfg.node_indices() {
         let block = &hir.cfg[node];
-        eprintln!("  block {:?} (pc {:?}): {} stmts, terminator={:?}",
-            node, block.pc_range, block.stmts.len(), block.terminator);
+        let then_n = lantern_hir::cfg::then_successor(&hir.cfg, node);
+        let else_n = lantern_hir::cfg::else_successor(&hir.cfg, node);
+        eprintln!("  block {:?} (pc {:?}): {} stmts, then={:?} else={:?}, terminator={:?}",
+            node, block.pc_range, block.stmts.len(), then_n, else_n, block.terminator);
         for (i, stmt) in block.stmts.iter().enumerate() {
             eprintln!("    stmt[{}]: {:?}", i, stmt);
         }
