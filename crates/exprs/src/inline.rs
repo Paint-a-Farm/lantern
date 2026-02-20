@@ -1,6 +1,8 @@
+use petgraph::stable_graph::NodeIndex;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use lantern_hir::arena::ExprId;
+use lantern_hir::cfg::Terminator;
 use lantern_hir::expr::HirExpr;
 use lantern_hir::func::HirFunc;
 use lantern_hir::stmt::{HirStmt, LValue};
@@ -40,6 +42,7 @@ fn inline_pass(func: &mut HirFunc) -> usize {
     let mut dead_stores: FxHashSet<VarId> = FxHashSet::default();
     let mut dead_calls: FxHashSet<VarId> = FxHashSet::default();
     let mut dead_call_extracts: FxHashSet<VarId> = FxHashSet::default();
+    let mut def_blocks: FxHashMap<VarId, NodeIndex> = FxHashMap::default();
 
     for node_idx in func.cfg.node_indices() {
         let block = &func.cfg[node_idx];
@@ -51,7 +54,45 @@ fn inline_pass(func: &mut HirFunc) -> usize {
             &mut dead_stores,
             &mut dead_calls,
             &mut dead_call_extracts,
+            &mut def_blocks,
+            node_idx,
         );
+    }
+
+    // Step 2b: Prevent inlining that would empty conditional bodies.
+    //
+    // Two cases:
+    // (a) Pre-structuring: variable defined in one CFG block, used in another.
+    //     Removing the definition empties the branch block.
+    // (b) Post-structuring: variable defined inside an If/While body, used outside.
+    //     Removing the definition empties the nested body.
+    //
+    // For (a): check cross-block inlining using def_blocks and use_blocks maps.
+    // For (b): check if the candidate is the sole statement in a conditional body.
+    let node_count = func.cfg.node_count();
+    if node_count > 1 && !single_use.is_empty() {
+        // Pre-structuring: prevent cross-block inlining
+        let use_blocks = build_use_blocks(func);
+        single_use.retain(|var_id, _| {
+            if let Some(def_block) = def_blocks.get(var_id) {
+                if let Some(blocks) = use_blocks.get(var_id) {
+                    blocks.contains(def_block)
+                } else {
+                    false
+                }
+            } else {
+                true
+            }
+        });
+    }
+
+    // Post-structuring (and general): prevent inlining variables that are the
+    // sole statement in a conditional body (If then/else/elseif, While, etc.)
+    if !single_use.is_empty() {
+        let sole_body_vars = find_sole_body_candidates(func, &single_use);
+        for var_id in &sole_body_vars {
+            single_use.remove(var_id);
+        }
     }
 
     let total = single_use.len() + dead_stores.len() + dead_calls.len() + dead_call_extracts.len();
@@ -88,6 +129,8 @@ fn find_candidates_in_stmts(
     dead_stores: &mut FxHashSet<VarId>,
     dead_calls: &mut FxHashSet<VarId>,
     dead_call_extracts: &mut FxHashSet<VarId>,
+    def_blocks: &mut FxHashMap<VarId, NodeIndex>,
+    current_block: NodeIndex,
 ) {
     for stmt in stmts {
         // Check this statement for a candidate
@@ -107,16 +150,20 @@ fn find_candidates_in_stmts(
                 if uses == 0 {
                     if !expr_has_side_effects(func, *value) {
                         dead_stores.insert(*var_id);
+                        def_blocks.insert(*var_id, current_block);
                     } else if is_statement_expr(func, *value) {
                         dead_calls.insert(*var_id);
+                        def_blocks.insert(*var_id, current_block);
                     } else {
                         dead_call_extracts.insert(*var_id);
+                        def_blocks.insert(*var_id, current_block);
                     }
                 } else if uses == 1 {
                     if !(matches!(func.exprs.get(*value), HirExpr::Table { .. })
                         && is_var_used_as_table_target(func, *var_id))
                     {
                         single_use.insert(*var_id, *value);
+                        def_blocks.insert(*var_id, current_block);
                     }
                 }
             }
@@ -125,17 +172,17 @@ fn find_candidates_in_stmts(
         // Recurse into nested bodies
         match stmt {
             HirStmt::If { then_body, elseif_clauses, else_body, .. } => {
-                find_candidates_in_stmts(then_body, func, use_counts, single_use, dead_stores, dead_calls, dead_call_extracts);
+                find_candidates_in_stmts(then_body, func, use_counts, single_use, dead_stores, dead_calls, dead_call_extracts, def_blocks, current_block);
                 for clause in elseif_clauses {
-                    find_candidates_in_stmts(&clause.body, func, use_counts, single_use, dead_stores, dead_calls, dead_call_extracts);
+                    find_candidates_in_stmts(&clause.body, func, use_counts, single_use, dead_stores, dead_calls, dead_call_extracts, def_blocks, current_block);
                 }
                 if let Some(body) = else_body {
-                    find_candidates_in_stmts(body, func, use_counts, single_use, dead_stores, dead_calls, dead_call_extracts);
+                    find_candidates_in_stmts(body, func, use_counts, single_use, dead_stores, dead_calls, dead_call_extracts, def_blocks, current_block);
                 }
             }
             HirStmt::While { body, .. } | HirStmt::Repeat { body, .. }
             | HirStmt::NumericFor { body, .. } | HirStmt::GenericFor { body, .. } => {
-                find_candidates_in_stmts(body, func, use_counts, single_use, dead_stores, dead_calls, dead_call_extracts);
+                find_candidates_in_stmts(body, func, use_counts, single_use, dead_stores, dead_calls, dead_call_extracts, def_blocks, current_block);
             }
             _ => {}
         }
@@ -215,6 +262,276 @@ fn apply_removals(
     }
 
     result
+}
+
+/// Find single-use candidates that are the sole statement in a conditional body.
+/// Removing these would leave the body empty, producing `if cond then end`.
+fn find_sole_body_candidates(
+    func: &HirFunc,
+    single_use: &FxHashMap<VarId, ExprId>,
+) -> FxHashSet<VarId> {
+    let mut result = FxHashSet::default();
+    for node_idx in func.cfg.node_indices() {
+        check_sole_body_stmts(&func.cfg[node_idx].stmts, single_use, false, &mut result);
+    }
+    result
+}
+
+/// Recursively check nested statement lists for sole-statement candidates.
+/// `in_conditional_body` is true when we're inside an If/While/Repeat/For body.
+fn check_sole_body_stmts(
+    stmts: &[HirStmt],
+    single_use: &FxHashMap<VarId, ExprId>,
+    in_conditional_body: bool,
+    result: &mut FxHashSet<VarId>,
+) {
+    // If we're in a conditional body and the ENTIRE body is a single candidate
+    // assignment, flag it.
+    if in_conditional_body && stmts.len() == 1 {
+        if let HirStmt::Assign {
+            target: LValue::Local(var_id),
+            ..
+        } = &stmts[0]
+        {
+            if single_use.contains_key(var_id) {
+                result.insert(*var_id);
+            }
+        }
+    }
+
+    // Recurse into nested bodies
+    for stmt in stmts {
+        match stmt {
+            HirStmt::If {
+                then_body,
+                elseif_clauses,
+                else_body,
+                ..
+            } => {
+                check_sole_body_stmts(then_body, single_use, true, result);
+                for clause in elseif_clauses {
+                    check_sole_body_stmts(&clause.body, single_use, true, result);
+                }
+                if let Some(body) = else_body {
+                    check_sole_body_stmts(body, single_use, true, result);
+                }
+            }
+            HirStmt::While { body, .. } | HirStmt::Repeat { body, .. } => {
+                check_sole_body_stmts(body, single_use, true, result);
+            }
+            HirStmt::NumericFor { body, .. } | HirStmt::GenericFor { body, .. } => {
+                check_sole_body_stmts(body, single_use, true, result);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Build a map from VarId to the set of CFG blocks where that variable is used.
+///
+/// "Used" means the variable appears in an expression reachable from a block's
+/// statements or terminator (branch conditions, return values, etc.).
+fn build_use_blocks(func: &HirFunc) -> FxHashMap<VarId, FxHashSet<NodeIndex>> {
+    let mut result: FxHashMap<VarId, FxHashSet<NodeIndex>> = FxHashMap::default();
+
+    for node_idx in func.cfg.node_indices() {
+        let block = &func.cfg[node_idx];
+
+        // Collect all root ExprIds from this block's statements
+        let mut expr_ids = Vec::new();
+        collect_stmt_expr_ids(&block.stmts, &mut expr_ids);
+
+        // Also collect from the terminator
+        match &block.terminator {
+            Terminator::Branch { condition } => expr_ids.push(*condition),
+            Terminator::Return(values) => expr_ids.extend(values.iter().copied()),
+            Terminator::ForNumPrep { start, limit, step, .. } => {
+                expr_ids.push(*start);
+                expr_ids.push(*limit);
+                if let Some(s) = step {
+                    expr_ids.push(*s);
+                }
+            }
+            Terminator::ForGenBack { iterators, .. } => {
+                expr_ids.extend(iterators.iter().copied());
+            }
+            _ => {}
+        }
+
+        // Recursively find all Var references from these root expressions
+        let mut visited_exprs = FxHashSet::default();
+        for expr_id in expr_ids {
+            collect_var_refs(func, expr_id, node_idx, &mut result, &mut visited_exprs);
+        }
+    }
+
+    result
+}
+
+/// Collect all ExprIds referenced directly by a list of statements.
+fn collect_stmt_expr_ids(stmts: &[HirStmt], out: &mut Vec<ExprId>) {
+    for stmt in stmts {
+        match stmt {
+            HirStmt::Assign { target, value } => {
+                collect_lvalue_expr_ids(target, out);
+                out.push(*value);
+            }
+            HirStmt::LocalDecl { init, .. } => {
+                if let Some(init) = init {
+                    out.push(*init);
+                }
+            }
+            HirStmt::MultiLocalDecl { values, .. } => {
+                out.extend(values.iter().copied());
+            }
+            HirStmt::MultiAssign { targets, values } => {
+                for t in targets {
+                    collect_lvalue_expr_ids(t, out);
+                }
+                out.extend(values.iter().copied());
+            }
+            HirStmt::CompoundAssign { target, value, .. } => {
+                collect_lvalue_expr_ids(target, out);
+                out.push(*value);
+            }
+            HirStmt::ExprStmt(e) => out.push(*e),
+            HirStmt::Return(values) => out.extend(values.iter().copied()),
+            HirStmt::FunctionDef { name, func_expr } => {
+                collect_lvalue_expr_ids(name, out);
+                out.push(*func_expr);
+            }
+            HirStmt::LocalFunctionDef { func_expr, .. } => out.push(*func_expr),
+            HirStmt::RegAssign { value, .. } => out.push(*value),
+            HirStmt::If { condition, then_body, elseif_clauses, else_body } => {
+                out.push(*condition);
+                collect_stmt_expr_ids(then_body, out);
+                for clause in elseif_clauses {
+                    out.push(clause.condition);
+                    collect_stmt_expr_ids(&clause.body, out);
+                }
+                if let Some(body) = else_body {
+                    collect_stmt_expr_ids(body, out);
+                }
+            }
+            HirStmt::While { condition, body } => {
+                out.push(*condition);
+                collect_stmt_expr_ids(body, out);
+            }
+            HirStmt::Repeat { condition, body } => {
+                out.push(*condition);
+                collect_stmt_expr_ids(body, out);
+            }
+            HirStmt::NumericFor { start, limit, step, body, .. } => {
+                out.push(*start);
+                out.push(*limit);
+                if let Some(s) = step {
+                    out.push(*s);
+                }
+                collect_stmt_expr_ids(body, out);
+            }
+            HirStmt::GenericFor { iterators, body, .. } => {
+                out.extend(iterators.iter().copied());
+                collect_stmt_expr_ids(body, out);
+            }
+            HirStmt::Break | HirStmt::Continue | HirStmt::CloseUpvals { .. } => {}
+        }
+    }
+}
+
+/// Collect ExprIds from an LValue (field access tables, index keys).
+fn collect_lvalue_expr_ids(lv: &LValue, out: &mut Vec<ExprId>) {
+    match lv {
+        LValue::Field { table, .. } => out.push(*table),
+        LValue::Index { table, key } => {
+            out.push(*table);
+            out.push(*key);
+        }
+        _ => {}
+    }
+}
+
+/// Recursively walk an expression tree and record all Var references for the given block.
+fn collect_var_refs(
+    func: &HirFunc,
+    expr_id: ExprId,
+    block: NodeIndex,
+    result: &mut FxHashMap<VarId, FxHashSet<NodeIndex>>,
+    visited: &mut FxHashSet<ExprId>,
+) {
+    if !visited.insert(expr_id) {
+        return;
+    }
+    match func.exprs.get(expr_id) {
+        HirExpr::Var(var_id) => {
+            result.entry(*var_id).or_default().insert(block);
+        }
+        HirExpr::FieldAccess { table, .. } => {
+            collect_var_refs(func, *table, block, result, visited);
+        }
+        HirExpr::IndexAccess { table, key } => {
+            let (t, k) = (*table, *key);
+            collect_var_refs(func, t, block, result, visited);
+            collect_var_refs(func, k, block, result, visited);
+        }
+        HirExpr::Binary { left, right, .. } => {
+            let (l, r) = (*left, *right);
+            collect_var_refs(func, l, block, result, visited);
+            collect_var_refs(func, r, block, result, visited);
+        }
+        HirExpr::Unary { operand, .. } => {
+            collect_var_refs(func, *operand, block, result, visited);
+        }
+        HirExpr::Call { func: f, args, .. } => {
+            let f = *f;
+            let args: Vec<_> = args.clone();
+            collect_var_refs(func, f, block, result, visited);
+            for a in &args {
+                collect_var_refs(func, *a, block, result, visited);
+            }
+        }
+        HirExpr::MethodCall { object, args, .. } => {
+            let obj = *object;
+            let args: Vec<_> = args.clone();
+            collect_var_refs(func, obj, block, result, visited);
+            for a in &args {
+                collect_var_refs(func, *a, block, result, visited);
+            }
+        }
+        HirExpr::Table { array, hash } => {
+            let array: Vec<_> = array.clone();
+            let hash: Vec<_> = hash.clone();
+            for a in &array {
+                collect_var_refs(func, *a, block, result, visited);
+            }
+            for (k, v) in &hash {
+                collect_var_refs(func, *k, block, result, visited);
+                collect_var_refs(func, *v, block, result, visited);
+            }
+        }
+        HirExpr::Concat(operands) => {
+            let ops: Vec<_> = operands.clone();
+            for o in &ops {
+                collect_var_refs(func, *o, block, result, visited);
+            }
+        }
+        HirExpr::IfExpr { condition, then_expr, else_expr } => {
+            let (c, t, e) = (*condition, *then_expr, *else_expr);
+            collect_var_refs(func, c, block, result, visited);
+            collect_var_refs(func, t, block, result, visited);
+            collect_var_refs(func, e, block, result, visited);
+        }
+        HirExpr::Select { source, .. } => {
+            collect_var_refs(func, *source, block, result, visited);
+        }
+        HirExpr::Closure { captures, .. } => {
+            for cap in captures {
+                if let lantern_hir::expr::CaptureSource::Var(var_id) = &cap.source {
+                    result.entry(*var_id).or_default().insert(block);
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Count how many times each VarId is used as a value (read).
