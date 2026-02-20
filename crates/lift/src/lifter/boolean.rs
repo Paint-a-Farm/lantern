@@ -233,8 +233,11 @@ impl<'a> super::Lifter<'a> {
             combined
         };
 
-        // Emit the assignment
-        let reg = self.reg_ref(result_reg, pc);
+        // Emit the assignment. Use a def_pc near the join point so that
+        // the variable solver's backwards lookup (scope_start - 1) finds
+        // this def and binds the debug variable name.
+        let def_pc = end_pc.saturating_sub(1);
+        let reg = self.reg_ref(result_reg, def_pc);
         self.emit_assign_reg(reg, result_expr);
 
         Some(end_pc - pc)
@@ -268,9 +271,20 @@ impl<'a> super::Lifter<'a> {
         // RegAssign to and_reg.
         let a_operand = if is_comparison {
             let insn = &self.func.instructions[pc];
-            self.lift_bool_condition(insn, pc).unwrap_or_else(|| {
+            let cond = self.lift_bool_condition(insn, pc).unwrap_or_else(|| {
                 self.alloc_expr(HirExpr::Reg(self.reg_ref(and_reg, pc)), pc)
-            })
+            });
+            // JumpXEqK* encodes polarity opposite to JumpIfNot*: the jump
+            // fires when the condition IS met (e.g. "jump if == nil"), but
+            // the source condition is the negation ("~= nil"). Flip it.
+            if matches!(insn.op,
+                OpCode::JumpXEqKNil | OpCode::JumpXEqKB |
+                OpCode::JumpXEqKN | OpCode::JumpXEqKS)
+            {
+                self.negate_comparison(cond, pc)
+            } else {
+                cond
+            }
         } else {
             self.pop_last_reg_assign(and_reg).unwrap_or_else(|| {
                 self.alloc_expr(HirExpr::Reg(self.reg_ref(and_reg, pc)), pc)
@@ -321,7 +335,10 @@ impl<'a> super::Lifter<'a> {
         );
 
         // Emit: result_reg = a and b or c
-        let reg = self.reg_ref(result_reg, pc);
+        // Use join_pc - 1 so the variable solver's backwards lookup
+        // (scope_start - 1) binds this def to the debug variable name.
+        let def_pc = join_pc.saturating_sub(1);
+        let reg = self.reg_ref(result_reg, def_pc);
         self.emit_assign_reg(reg, result_expr);
 
         Some(join_pc - pc)
@@ -354,9 +371,20 @@ impl<'a> super::Lifter<'a> {
         // instruction itself. For truthiness jumps, pop the last RegAssign.
         let cond_operand = if is_comparison {
             let insn = &self.func.instructions[pc];
-            self.lift_bool_condition(insn, pc).unwrap_or_else(|| {
+            let cond = self.lift_bool_condition(insn, pc).unwrap_or_else(|| {
                 self.alloc_expr(HirExpr::Reg(self.reg_ref(cond_reg, pc)), pc)
-            })
+            });
+            // JumpXEqK* encodes polarity opposite to JumpIfNot*: the jump
+            // fires when the condition IS met, but the source condition is
+            // the negation. Flip it.
+            if matches!(insn.op,
+                OpCode::JumpXEqKNil | OpCode::JumpXEqKB |
+                OpCode::JumpXEqKN | OpCode::JumpXEqKS)
+            {
+                self.negate_comparison(cond, pc)
+            } else {
+                cond
+            }
         } else {
             self.pop_last_reg_assign(cond_reg).unwrap_or_else(|| {
                 self.alloc_expr(HirExpr::Reg(self.reg_ref(cond_reg, pc)), pc)
@@ -405,7 +433,10 @@ impl<'a> super::Lifter<'a> {
         );
 
         // Emit: result_reg = cond and true_val or false_val
-        let reg = self.reg_ref(result_reg, pc);
+        // Use join_pc - 1 so the variable solver's backwards lookup
+        // (scope_start - 1) binds this def to the debug variable name.
+        let def_pc = join_pc.saturating_sub(1);
+        let reg = self.reg_ref(result_reg, def_pc);
         self.emit_assign_reg(reg, result_expr);
 
         Some(join_pc - pc)
