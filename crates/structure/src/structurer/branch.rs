@@ -3,12 +3,12 @@ use petgraph::visit::EdgeRef;
 use rustc_hash::FxHashSet;
 
 use lantern_hir::arena::ExprId;
-use lantern_hir::cfg::EdgeKind;
+use lantern_hir::cfg::{EdgeKind, Terminator};
 use lantern_hir::func::HirFunc;
 use lantern_hir::stmt::{ElseIfClause, HirStmt};
 
 use super::LoopCtx;
-use super::cfg_helpers::{branch_successors, find_join_point, negate_condition};
+use super::cfg_helpers::{self, branch_successors, find_join_point, negate_condition};
 use super::guard::{ends_with_exit, is_guard_clause};
 use super::structure_region;
 
@@ -66,21 +66,70 @@ pub(super) fn structure_branch(
 
             // Fix for asymmetric returns: if join is None, check if one
             // branch always returns and the other continues.
-            let effective_join = join.or_else(|| {
-                let then_returns = branch_always_returns(func, then_n, stop);
-                let else_returns = branch_always_returns(func, else_n, stop);
-                if then_returns && !else_returns {
+            let (effective_join, then_returns, else_returns) = if join.is_some() {
+                (join, false, false)
+            } else {
+                let tr = branch_always_returns(func, then_n, stop);
+                let er = branch_always_returns(func, else_n, stop);
+                let ej = if tr && !er {
                     Some(else_n)
-                } else if else_returns && !then_returns {
+                } else if er && !tr {
                     Some(then_n)
                 } else {
                     None
+                };
+                (ej, tr, er)
+            };
+
+            // Guard clause shortcut: when one branch always returns and the
+            // other continues, emit `if [not] cond then <return> end` directly.
+            // This avoids the problem where shared return nodes have already
+            // been visited, making structure_region return empty.
+            if join.is_none() && then_returns && !else_returns {
+                // then always returns → `if cond then <return> end; <continue from else>`
+                let then_stmts = collect_return_stmts(func, then_n, stop, loop_ctx, visited);
+                if !then_stmts.is_empty() {
+                    result.push(HirStmt::If {
+                        condition,
+                        then_body: then_stmts,
+                        elseif_clauses: Vec::new(),
+                        else_body: None,
+                    });
+                    return Some(else_n);
                 }
-            });
+            }
+            if join.is_none() && else_returns && !then_returns {
+                // else always returns → `if not cond then <return> end; <continue from then>`
+                let else_stmts = collect_return_stmts(func, else_n, stop, loop_ctx, visited);
+                if !else_stmts.is_empty() {
+                    let inv_cond = negate_condition(func, condition);
+                    result.push(HirStmt::If {
+                        condition: inv_cond,
+                        then_body: else_stmts,
+                        elseif_clauses: Vec::new(),
+                        else_body: None,
+                    });
+                    return Some(then_n);
+                }
+            }
 
             let branch_stop = effective_join.or(stop);
-            let then_stmts = structure_region(func, then_n, branch_stop, loop_ctx, visited);
-            let else_stmts = structure_region(func, else_n, branch_stop, loop_ctx, visited);
+            let mut then_stmts = structure_region(func, then_n, branch_stop, loop_ctx, visited);
+            let mut else_stmts = structure_region(func, else_n, branch_stop, loop_ctx, visited);
+
+            // When a branch targets a shared Return node that was already
+            // visited by an earlier branch, structure_region returns empty.
+            // Recover the return statement by cloning it from the terminator.
+            if then_stmts.is_empty() {
+                if let Some(ret) = clone_return_from_node(func, then_n) {
+                    then_stmts = vec![ret];
+                }
+            }
+            if else_stmts.is_empty() {
+                if let Some(ret) = clone_return_from_node(func, else_n) {
+                    else_stmts = vec![ret];
+                }
+            }
 
             let (elseif_clauses, final_else) = extract_elseif_chain(else_stmts);
 
@@ -200,6 +249,66 @@ pub(super) fn branch_always_returns(
         }
     }
     !visited.is_empty()
+}
+
+/// If `node` is a terminal Return block (no statements, just a return
+/// terminator), clone its return as a HirStmt.  This handles the case where
+/// multiple branches share the same Return node — only the first visitor
+/// gets to structure it, but later branches still need the return statement.
+fn clone_return_from_node(func: &HirFunc, node: NodeIndex) -> Option<HirStmt> {
+    let block = &func.cfg[node];
+    if let Terminator::Return(values) = &block.terminator {
+        // Only recover if the block has no other statements — a pure return.
+        if block.stmts.is_empty() {
+            return Some(HirStmt::Return(values.clone()));
+        }
+    }
+    None
+}
+
+/// Collect return statements from a branch that always returns.
+/// Walks through already-visited nodes following unconditional jumps
+/// until a Return terminator is found.  This enables guard-clause
+/// emission for shared return blocks that were consumed by earlier
+/// structuring passes.
+fn collect_return_stmts(
+    func: &mut HirFunc,
+    start: NodeIndex,
+    stop: Option<NodeIndex>,
+    loop_ctx: Option<&LoopCtx>,
+    visited: &mut FxHashSet<NodeIndex>,
+) -> Vec<HirStmt> {
+    // First, try normal structuring — this works when the return node
+    // hasn't been visited yet.
+    let stmts = structure_region(func, start, stop, loop_ctx, visited);
+    if !stmts.is_empty() {
+        return stmts;
+    }
+
+    // If structuring returned empty, walk the chain to find the return.
+    let mut node = start;
+    let mut walked = FxHashSet::default();
+    loop {
+        if !walked.insert(node) {
+            break;
+        }
+        let block = &func.cfg[node];
+        match &block.terminator {
+            Terminator::Return(values) => {
+                return vec![HirStmt::Return(values.clone())];
+            }
+            Terminator::Jump => {
+                // Follow unconditional jumps
+                if let Some(succ) = cfg_helpers::single_successor(&func.cfg, node) {
+                    node = succ;
+                    continue;
+                }
+                break;
+            }
+            _ => break,
+        }
+    }
+    Vec::new()
 }
 
 pub(super) fn extract_elseif_chain(
