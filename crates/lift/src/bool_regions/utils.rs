@@ -45,11 +45,14 @@ pub fn conditional_jump_target(insn: &Instruction, pc: usize) -> Option<usize> {
 }
 
 /// Check if an instruction is a barrier that cannot appear inside a boolean chain.
+///
+/// Call is NOT a barrier — `a or func()` is valid Lua. The call is the value
+/// producer in the chain tail. Side-effect-only instructions (SetTable, Return,
+/// etc.) remain barriers because they indicate control flow, not value expressions.
 pub fn is_chain_barrier(insn: &Instruction) -> bool {
     matches!(
         insn.op,
         OpCode::Return
-            | OpCode::Call
             | OpCode::SetGlobal
             | OpCode::SetUpval
             | OpCode::SetTable
@@ -65,6 +68,26 @@ pub fn is_chain_barrier(insn: &Instruction) -> bool {
             | OpCode::ForGPrepNext
             | OpCode::ForGLoop
     )
+}
+
+/// Check if an instruction is a negated conditional jump (the "if not cond" family).
+///
+/// These are used as the leading jump in value ternaries and and-or ternaries:
+/// `JumpIfNot` tests truthiness, `JumpIfNotEq/Le/Lt` test comparisons,
+/// `JumpXEqK*` with NOT flag clear tests equality (jump if equal → negated).
+/// All produce the same structural pattern: jump over true-value to false-value.
+pub fn is_negated_conditional_jump(insn: &Instruction) -> bool {
+    match insn.op {
+        OpCode::JumpIfNot | OpCode::JumpIfNotEq | OpCode::JumpIfNotLe | OpCode::JumpIfNotLt => {
+            true
+        }
+        // JumpXEqK* with NOT flag clear: "jump if reg == value"
+        // This is the negated sense for `and` chains (source was `reg ~= value and ...`)
+        OpCode::JumpXEqKNil | OpCode::JumpXEqKB | OpCode::JumpXEqKN | OpCode::JumpXEqKS => {
+            (insn.aux >> 31) == 0
+        }
+        _ => false,
+    }
 }
 
 /// Check if an instruction writes to a specific register.
@@ -101,6 +124,8 @@ pub fn writes_register(insn: &Instruction, register: u8) -> bool {
             | OpCode::Length
             | OpCode::Concat
             | OpCode::Call
+            | OpCode::NewTable
+            | OpCode::DupTable
     )
 }
 

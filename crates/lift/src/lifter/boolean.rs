@@ -261,15 +261,24 @@ impl<'a> super::Lifter<'a> {
         let join_pc = self.and_or_ternaries[ternary_idx].join_pc;
         let and_reg = self.and_or_ternaries[ternary_idx].and_reg;
         let result_reg = self.and_or_ternaries[ternary_idx].result_reg;
+        let is_comparison = self.and_or_ternaries[ternary_idx].is_comparison;
 
-        // The "a" operand: the value in and_reg was loaded by instructions
-        // already lifted before this PC. Pop the last RegAssign to and_reg.
-        let a_operand = self.pop_last_reg_assign(and_reg).unwrap_or_else(|| {
-            self.alloc_expr(HirExpr::Reg(self.reg_ref(and_reg, pc)), pc)
-        });
+        // The "a" operand: for comparison jumps, extract the condition from
+        // the jump instruction itself. For truthiness jumps, pop the last
+        // RegAssign to and_reg.
+        let a_operand = if is_comparison {
+            let insn = &self.func.instructions[pc];
+            self.lift_bool_condition(insn, pc).unwrap_or_else(|| {
+                self.alloc_expr(HirExpr::Reg(self.reg_ref(and_reg, pc)), pc)
+            })
+        } else {
+            self.pop_last_reg_assign(and_reg).unwrap_or_else(|| {
+                self.alloc_expr(HirExpr::Reg(self.reg_ref(and_reg, pc)), pc)
+            })
+        };
 
-        // Lift the "b" part: instructions between and_jump+1 and or_jump
-        let b_start = and_jump_pc + 1;
+        // Lift the "b" part: instructions between and_jump+1 (skipping AUX) and or_jump
+        let b_start = if is_comparison { and_jump_pc + 2 } else { and_jump_pc + 1 };
         let mut seg_pc = b_start;
         while seg_pc < or_jump_pc {
             let insn = &self.func.instructions[seg_pc];
@@ -339,15 +348,23 @@ impl<'a> super::Lifter<'a> {
         let join_pc = self.value_ternaries[idx].join_pc;
         let cond_reg = self.value_ternaries[idx].cond_reg;
         let result_reg = self.value_ternaries[idx].result_reg;
+        let is_comparison = self.value_ternaries[idx].is_comparison;
 
-        // The condition operand: value in cond_reg was loaded by instructions
-        // already lifted before this PC. Pop the last RegAssign to cond_reg.
-        let cond_operand = self.pop_last_reg_assign(cond_reg).unwrap_or_else(|| {
-            self.alloc_expr(HirExpr::Reg(self.reg_ref(cond_reg, pc)), pc)
-        });
+        // The condition operand: for comparison jumps, extract from the jump
+        // instruction itself. For truthiness jumps, pop the last RegAssign.
+        let cond_operand = if is_comparison {
+            let insn = &self.func.instructions[pc];
+            self.lift_bool_condition(insn, pc).unwrap_or_else(|| {
+                self.alloc_expr(HirExpr::Reg(self.reg_ref(cond_reg, pc)), pc)
+            })
+        } else {
+            self.pop_last_reg_assign(cond_reg).unwrap_or_else(|| {
+                self.alloc_expr(HirExpr::Reg(self.reg_ref(cond_reg, pc)), pc)
+            })
+        };
 
-        // Lift the true-value instructions (between jump_pc+1 and skip_jump_pc)
-        let true_start = jump_pc + 1;
+        // Lift the true-value instructions (skip AUX word for comparison jumps)
+        let true_start = if is_comparison { jump_pc + 2 } else { jump_pc + 1 };
         let mut seg_pc = true_start;
         while seg_pc < skip_jump_pc {
             let insn = &self.func.instructions[seg_pc];

@@ -11,17 +11,20 @@
 //! ```
 //!
 //! This represents `Rb = a and b or c`. The result register is Rb.
+//!
+//! Also handles comparison-based conditions where the leading jump is
+//! `JumpIfNotEq/Le/Lt` instead of `JumpIfNot`, e.g. `(a <= b) and x or y`.
 
 use lantern_bytecode::instruction::Instruction;
 use lantern_bytecode::opcode::OpCode;
 use rustc_hash::FxHashSet;
 
-use super::utils::{has_aux_word, tail_has_side_effects, tail_loads_register};
+use super::utils::{has_aux_word, is_negated_conditional_jump, tail_has_side_effects, tail_loads_register};
 
 /// A compound `a and b or c` ternary expression.
 #[derive(Debug)]
 pub struct AndOrTernary {
-    /// PC of the JumpIfNot instruction (the "and" test).
+    /// PC of the JumpIfNot (or JumpIfNotEq/Le/Lt) instruction (the "and" test).
     pub and_jump_pc: usize,
     /// PC of the JumpIf instruction (the "or" skip).
     pub or_jump_pc: usize,
@@ -29,10 +32,13 @@ pub struct AndOrTernary {
     pub fallback_pc: usize,
     /// PC after the entire ternary (the join point).
     pub join_pc: usize,
-    /// The register tested by the "and" part (Ra).
+    /// The register tested by the "and" part (Ra). Only meaningful for
+    /// JumpIfNot; for comparison jumps the condition involves two registers.
     pub and_reg: u8,
     /// The register holding the result (Rb).
     pub result_reg: u8,
+    /// True if the leading jump is a comparison (JumpIfNotEq/Le/Lt).
+    pub is_comparison: bool,
 }
 
 /// Detect compound `a and b or c` ternaries.
@@ -48,7 +54,7 @@ pub fn detect_and_or_ternaries(
     for t in &ternaries {
         suppressed.insert(t.and_jump_pc);
         suppressed.insert(t.or_jump_pc);
-        // Also suppress the NOP after JumpIfNot if it has an AUX word.
+        // Also suppress the NOP/AUX after the leading jump if it has an AUX word.
         if has_aux_word(instructions[t.and_jump_pc].op) {
             suppressed.insert(t.and_jump_pc + 1);
         }
@@ -64,14 +70,16 @@ fn find_and_or_ternaries(instructions: &[Instruction]) -> Vec<AndOrTernary> {
     while pc < instructions.len() {
         let insn = &instructions[pc];
 
-        // Look for JumpIfNot Ra (the "and" part).
-        if insn.op == OpCode::JumpIfNot {
+        // Look for any negated conditional jump (the "and" part).
+        if is_negated_conditional_jump(insn) {
+            let is_comparison = insn.op != OpCode::JumpIfNot;
             let and_reg = insn.a;
             let fallback_pc = ((pc + 1) as i64 + insn.d as i64) as usize;
 
             // Scan forward for a JumpIf Rb that jumps past the fallback.
-            // The JumpIf must be BEFORE fallback_pc.
-            let mut scan = pc + 1;
+            // Start scanning after the AUX word if present.
+            let scan_start = if has_aux_word(insn.op) { pc + 2 } else { pc + 1 };
+            let mut scan = scan_start;
             while scan < fallback_pc && scan < instructions.len() {
                 let scan_insn = &instructions[scan];
                 if scan_insn.op == OpCode::JumpIf {
@@ -92,6 +100,7 @@ fn find_and_or_ternaries(instructions: &[Instruction]) -> Vec<AndOrTernary> {
                             join_pc,
                             and_reg,
                             result_reg: or_reg,
+                            is_comparison,
                         });
                         pc = join_pc;
                         break;
