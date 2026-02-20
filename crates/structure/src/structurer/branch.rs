@@ -12,6 +12,29 @@ use super::cfg_helpers::{self, branch_successors, find_join_point, negate_condit
 use super::guard::{ends_with_exit, is_guard_clause};
 use super::structure_region;
 
+/// Follow unconditional jumps from `start` to find the effective target.
+/// Returns `start` itself if it's not a pure Jump block, otherwise follows
+/// the chain until a non-Jump block or a visited node is reached.
+fn resolve_jump_target(func: &HirFunc, start: NodeIndex) -> NodeIndex {
+    let mut node = start;
+    let mut seen = FxHashSet::default();
+    loop {
+        if !seen.insert(node) {
+            return node;
+        }
+        let block = &func.cfg[node];
+        // Only follow pure Jump blocks with no statements
+        if !block.stmts.is_empty() || !matches!(block.terminator, Terminator::Jump) {
+            return node;
+        }
+        if let Some(succ) = cfg_helpers::single_successor(&func.cfg, node) {
+            node = succ;
+        } else {
+            return node;
+        }
+    }
+}
+
 /// Structure a branch (if/else) and return the next node to continue from.
 pub(super) fn structure_branch(
     func: &mut HirFunc,
@@ -26,10 +49,16 @@ pub(super) fn structure_branch(
 
     match (then_node, else_node) {
         (Some(then_n), Some(else_n)) => {
-            // Check for break/continue as branch targets
+            // Check for break/continue as branch targets.
+            // Resolve through intermediate Jump blocks so that compound
+            // condition chains (A and B → continue) are detected even when
+            // the branch doesn't directly target the loop header/exit.
             if let Some(lctx) = loop_ctx {
+                let then_target = resolve_jump_target(func, then_n);
+                let else_target = resolve_jump_target(func, else_n);
+
                 // if cond then break end
-                if Some(then_n) == lctx.exit && !visited.contains(&then_n) {
+                if Some(then_target) == lctx.exit && !visited.contains(&then_target) {
                     result.push(HirStmt::If {
                         condition,
                         then_body: vec![HirStmt::Break],
@@ -39,7 +68,7 @@ pub(super) fn structure_branch(
                     return Some(else_n);
                 }
                 // if cond then continue end
-                if then_n == lctx.header {
+                if then_target == lctx.header {
                     result.push(HirStmt::If {
                         condition,
                         then_body: vec![HirStmt::Continue],
@@ -49,11 +78,22 @@ pub(super) fn structure_branch(
                     return Some(else_n);
                 }
                 // if not cond then break end (else branch breaks)
-                if Some(else_n) == lctx.exit && !visited.contains(&else_n) {
+                if Some(else_target) == lctx.exit && !visited.contains(&else_target) {
                     let inv_cond = negate_condition(func, condition);
                     result.push(HirStmt::If {
                         condition: inv_cond,
                         then_body: vec![HirStmt::Break],
+                        elseif_clauses: Vec::new(),
+                        else_body: None,
+                    });
+                    return Some(then_n);
+                }
+                // if not cond then continue end (else branch continues)
+                if else_target == lctx.header {
+                    let inv_cond = negate_condition(func, condition);
+                    result.push(HirStmt::If {
+                        condition: inv_cond,
+                        then_body: vec![HirStmt::Continue],
                         elseif_clauses: Vec::new(),
                         else_body: None,
                     });
