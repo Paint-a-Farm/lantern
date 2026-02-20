@@ -110,6 +110,7 @@ pub fn writes_register(insn: &Instruction, register: u8) -> bool {
             | OpCode::GetTable
             | OpCode::GetTableKS
             | OpCode::GetTableN
+            | OpCode::NameCall
             | OpCode::Add
             | OpCode::Sub
             | OpCode::Mul
@@ -117,8 +118,19 @@ pub fn writes_register(insn: &Instruction, register: u8) -> bool {
             | OpCode::Mod
             | OpCode::Pow
             | OpCode::IDiv
+            | OpCode::AddK
+            | OpCode::SubK
+            | OpCode::MulK
+            | OpCode::DivK
+            | OpCode::ModK
+            | OpCode::PowK
+            | OpCode::IDivK
+            | OpCode::SubRK
+            | OpCode::DivRK
             | OpCode::And
             | OpCode::Or
+            | OpCode::AndK
+            | OpCode::OrK
             | OpCode::Not
             | OpCode::Minus
             | OpCode::Length
@@ -126,6 +138,9 @@ pub fn writes_register(insn: &Instruction, register: u8) -> bool {
             | OpCode::Call
             | OpCode::NewTable
             | OpCode::DupTable
+            | OpCode::NewClosure
+            | OpCode::DupClosure
+            | OpCode::GetVarArgs
     )
 }
 
