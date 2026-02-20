@@ -133,10 +133,20 @@ impl<'a> Lifter<'a> {
             crate::bool_regions::detect_value_ternaries(instructions);
         self.value_ternaries = value_ternaries.into_iter().filter(|t| {
             !suppressed.contains(&t.jump_pc) && !suppressed.contains(&t.skip_jump_pc)
+                && t.compound_jump_pcs.iter().all(|&cpc| !suppressed.contains(&cpc))
         }).collect();
         for t in &self.value_ternaries {
             suppressed.insert(t.jump_pc);
             suppressed.insert(t.skip_jump_pc);
+            if crate::bool_regions::has_aux_word(instructions[t.jump_pc].op) {
+                suppressed.insert(t.jump_pc + 1);
+            }
+            for &cpc in &t.compound_jump_pcs {
+                suppressed.insert(cpc);
+                if crate::bool_regions::has_aux_word(instructions[cpc].op) {
+                    suppressed.insert(cpc + 1);
+                }
+            }
         }
 
         // Discover block boundaries

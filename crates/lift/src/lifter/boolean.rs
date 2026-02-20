@@ -259,40 +259,71 @@ impl<'a> super::Lifter<'a> {
         let ternary_idx = self.and_or_ternaries.iter().position(|t| t.and_jump_pc == pc)?;
 
         let and_jump_pc = self.and_or_ternaries[ternary_idx].and_jump_pc;
+        let compound_jump_pcs = self.and_or_ternaries[ternary_idx].compound_jump_pcs.clone();
         let or_jump_pc = self.and_or_ternaries[ternary_idx].or_jump_pc;
         let fallback_pc = self.and_or_ternaries[ternary_idx].fallback_pc;
         let join_pc = self.and_or_ternaries[ternary_idx].join_pc;
-        let and_reg = self.and_or_ternaries[ternary_idx].and_reg;
         let result_reg = self.and_or_ternaries[ternary_idx].result_reg;
-        let is_comparison = self.and_or_ternaries[ternary_idx].is_comparison;
 
-        // The "a" operand: for comparison jumps, extract the condition from
-        // the jump instruction itself. For truthiness jumps, pop the last
-        // RegAssign to and_reg.
-        let a_operand = if is_comparison {
-            let insn = &self.func.instructions[pc];
-            let cond = self.lift_bool_condition(insn, pc).unwrap_or_else(|| {
-                self.alloc_expr(HirExpr::Reg(self.reg_ref(and_reg, pc)), pc)
-            });
-            // JumpXEqK* encodes polarity opposite to JumpIfNot*: the jump
-            // fires when the condition IS met (e.g. "jump if == nil"), but
-            // the source condition is the negation ("~= nil"). Flip it.
-            if matches!(insn.op,
-                OpCode::JumpXEqKNil | OpCode::JumpXEqKB |
-                OpCode::JumpXEqKN | OpCode::JumpXEqKS)
-            {
-                self.negate_comparison(cond, pc)
-            } else {
-                cond
+        // Build all condition jump PCs in order.
+        let mut all_cond_pcs = vec![and_jump_pc];
+        all_cond_pcs.extend(&compound_jump_pcs);
+
+        // Lift instructions between each pair of condition jumps, then the
+        // condition itself. Chain all conditions with "and".
+        let mut combined_cond: Option<ExprId> = None;
+
+        for (i, &cond_pc) in all_cond_pcs.iter().enumerate() {
+            let cond_insn = &self.func.instructions[cond_pc];
+            let cond_is_comparison = cond_insn.op != OpCode::JumpIfNot;
+
+            // Lift instructions between the previous jump and this one (value loads
+            // for conditions like `a.b` or `type(x)`).
+            if i > 0 {
+                let prev_pc = all_cond_pcs[i - 1];
+                let prev_insn = &self.func.instructions[prev_pc];
+                let seg_start = prev_pc + if prev_insn.op.has_aux() { 2 } else { 1 };
+                let mut seg_pc = seg_start;
+                while seg_pc < cond_pc {
+                    let insn = &self.func.instructions[seg_pc];
+                    let advance = self.lift_instruction(insn, seg_pc);
+                    seg_pc += advance;
+                }
             }
-        } else {
-            self.pop_last_reg_assign(and_reg).unwrap_or_else(|| {
-                self.alloc_expr(HirExpr::Reg(self.reg_ref(and_reg, pc)), pc)
-            })
-        };
 
-        // Lift the "b" part: instructions between and_jump+1 (skipping AUX) and or_jump
-        let b_start = if is_comparison { and_jump_pc + 2 } else { and_jump_pc + 1 };
+            // Extract this condition.
+            let cond_operand = if cond_is_comparison {
+                let cond = self.lift_bool_condition(cond_insn, cond_pc).unwrap_or_else(|| {
+                    self.alloc_expr(HirExpr::Reg(self.reg_ref(cond_insn.a, cond_pc)), cond_pc)
+                });
+                self.negate_ternary_condition(cond_insn, cond, cond_pc)
+            } else {
+                self.pop_last_reg_assign(cond_insn.a).unwrap_or_else(|| {
+                    self.alloc_expr(HirExpr::Reg(self.reg_ref(cond_insn.a, cond_pc)), cond_pc)
+                })
+            };
+
+            // Chain with previous conditions: cond1 and cond2 and ...
+            combined_cond = Some(if let Some(prev) = combined_cond {
+                self.alloc_expr(
+                    HirExpr::Binary {
+                        op: BinOp::And,
+                        left: prev,
+                        right: cond_operand,
+                    },
+                    cond_pc,
+                )
+            } else {
+                cond_operand
+            });
+        }
+
+        let a_operand = combined_cond.unwrap();
+
+        // Lift the "b" part: instructions between last condition jump and or_jump.
+        let last_cond_pc = *all_cond_pcs.last().unwrap();
+        let last_cond_insn = &self.func.instructions[last_cond_pc];
+        let b_start = last_cond_pc + if last_cond_insn.op.has_aux() { 2 } else { 1 };
         let mut seg_pc = b_start;
         while seg_pc < or_jump_pc {
             let insn = &self.func.instructions[seg_pc];
@@ -316,7 +347,7 @@ impl<'a> super::Lifter<'a> {
             self.alloc_expr(HirExpr::Reg(self.reg_ref(result_reg, fallback_pc)), fallback_pc)
         });
 
-        // Build: a and b or c → Binary(Or, Binary(And, a, b), c)
+        // Build: (a1 and a2 and ...) and b or c
         let and_expr = self.alloc_expr(
             HirExpr::Binary {
                 op: BinOp::And,
@@ -344,55 +375,87 @@ impl<'a> super::Lifter<'a> {
         Some(join_pc - pc)
     }
 
-    /// Try to lift a simple conditional value ternary starting at `pc`.
+    /// Try to lift a conditional value ternary starting at `pc`.
     ///
-    /// Pattern:
+    /// Handles both simple and compound-condition patterns:
     /// ```text
-    /// JumpIfNot Ra, +N         → false_val_pc
+    /// JumpIfNot* cond1, +N      → false_val_pc
+    /// [JumpIfNot* cond2, +N     → false_val_pc]  (optional compound conditions)
     /// [load true value into Rb]
-    /// Jump +M                  → join_pc
+    /// Jump +M                   → join_pc
     /// [load false value into Rb]  ← false_val_pc
     /// <join>                      ← join_pc
     /// ```
     ///
-    /// Produces: `Rb = Ra and true_val or false_val`
+    /// Produces: `Rb = (cond1 and cond2) and true_val or false_val`
     pub(super) fn try_lift_value_ternary(&mut self, pc: usize) -> Option<usize> {
         let idx = self.value_ternaries.iter().position(|t| t.jump_pc == pc)?;
 
         let jump_pc = self.value_ternaries[idx].jump_pc;
+        let compound_jump_pcs = self.value_ternaries[idx].compound_jump_pcs.clone();
         let skip_jump_pc = self.value_ternaries[idx].skip_jump_pc;
         let false_val_pc = self.value_ternaries[idx].false_val_pc;
         let join_pc = self.value_ternaries[idx].join_pc;
-        let cond_reg = self.value_ternaries[idx].cond_reg;
         let result_reg = self.value_ternaries[idx].result_reg;
-        let is_comparison = self.value_ternaries[idx].is_comparison;
 
-        // The condition operand: for comparison jumps, extract from the jump
-        // instruction itself. For truthiness jumps, pop the last RegAssign.
-        let cond_operand = if is_comparison {
-            let insn = &self.func.instructions[pc];
-            let cond = self.lift_bool_condition(insn, pc).unwrap_or_else(|| {
-                self.alloc_expr(HirExpr::Reg(self.reg_ref(cond_reg, pc)), pc)
-            });
-            // JumpXEqK* encodes polarity opposite to JumpIfNot*: the jump
-            // fires when the condition IS met, but the source condition is
-            // the negation. Flip it.
-            if matches!(insn.op,
-                OpCode::JumpXEqKNil | OpCode::JumpXEqKB |
-                OpCode::JumpXEqKN | OpCode::JumpXEqKS)
-            {
-                self.negate_comparison(cond, pc)
-            } else {
-                cond
+        // Build all condition jump PCs in order.
+        let mut all_cond_pcs = vec![jump_pc];
+        all_cond_pcs.extend(&compound_jump_pcs);
+
+        // Lift instructions between each pair of condition jumps, then the
+        // condition itself. Chain all conditions with "and".
+        let mut combined_cond: Option<ExprId> = None;
+
+        for (i, &cond_pc) in all_cond_pcs.iter().enumerate() {
+            let cond_insn = &self.func.instructions[cond_pc];
+            let cond_is_comparison = cond_insn.op != OpCode::JumpIfNot;
+
+            // Lift instructions between the previous jump and this one.
+            if i > 0 {
+                let prev_pc = all_cond_pcs[i - 1];
+                let prev_insn = &self.func.instructions[prev_pc];
+                let seg_start = prev_pc + if prev_insn.op.has_aux() { 2 } else { 1 };
+                let mut seg_pc = seg_start;
+                while seg_pc < cond_pc {
+                    let insn = &self.func.instructions[seg_pc];
+                    let advance = self.lift_instruction(insn, seg_pc);
+                    seg_pc += advance;
+                }
             }
-        } else {
-            self.pop_last_reg_assign(cond_reg).unwrap_or_else(|| {
-                self.alloc_expr(HirExpr::Reg(self.reg_ref(cond_reg, pc)), pc)
-            })
-        };
 
-        // Lift the true-value instructions (skip AUX word for comparison jumps)
-        let true_start = if is_comparison { jump_pc + 2 } else { jump_pc + 1 };
+            // Extract this condition.
+            let cond_operand = if cond_is_comparison {
+                let cond = self.lift_bool_condition(cond_insn, cond_pc).unwrap_or_else(|| {
+                    self.alloc_expr(HirExpr::Reg(self.reg_ref(cond_insn.a, cond_pc)), cond_pc)
+                });
+                self.negate_ternary_condition(cond_insn, cond, cond_pc)
+            } else {
+                self.pop_last_reg_assign(cond_insn.a).unwrap_or_else(|| {
+                    self.alloc_expr(HirExpr::Reg(self.reg_ref(cond_insn.a, cond_pc)), cond_pc)
+                })
+            };
+
+            // Chain with previous conditions: cond1 and cond2 and ...
+            combined_cond = Some(if let Some(prev) = combined_cond {
+                self.alloc_expr(
+                    HirExpr::Binary {
+                        op: BinOp::And,
+                        left: prev,
+                        right: cond_operand,
+                    },
+                    cond_pc,
+                )
+            } else {
+                cond_operand
+            });
+        }
+
+        let cond_operand = combined_cond.unwrap();
+
+        // Lift the true-value instructions (after the last condition jump).
+        let last_cond_pc = *all_cond_pcs.last().unwrap();
+        let last_cond_insn = &self.func.instructions[last_cond_pc];
+        let true_start = last_cond_pc + if last_cond_insn.op.has_aux() { 2 } else { 1 };
         let mut seg_pc = true_start;
         while seg_pc < skip_jump_pc {
             let insn = &self.func.instructions[seg_pc];
@@ -414,7 +477,7 @@ impl<'a> super::Lifter<'a> {
             self.alloc_expr(HirExpr::Reg(self.reg_ref(result_reg, false_val_pc)), false_val_pc)
         });
 
-        // Build: cond and true_val or false_val
+        // Build: (cond1 and cond2 ...) and true_val or false_val
         let and_expr = self.alloc_expr(
             HirExpr::Binary {
                 op: BinOp::And,
@@ -520,8 +583,36 @@ impl<'a> super::Lifter<'a> {
         }
     }
 
+    /// Extract the SOURCE condition from a ternary leading jump.
+    ///
+    /// In a ternary, the jump fires when the source condition is FALSE.
+    /// `lift_bool_condition` returns the "positive comparison" for register-pair
+    /// jumps and the "jump condition" for JumpXEqK*. This helper adjusts the
+    /// result so the caller gets the source condition the programmer wrote.
+    ///
+    /// Needs negation: JumpIfEq/Le/Lt, all JumpXEqK* (both NOT flag values)
+    /// No negation:    JumpIfNotEq/NotLe/NotLt (lift_bool_condition already
+    ///                 double-negated to positive, which IS the source condition)
+    fn negate_ternary_condition(&mut self, insn: &Instruction, cond: ExprId, _pc: usize) -> ExprId {
+        match insn.op {
+            // Positive-sense jumps: jump fires when comparison IS met.
+            // Source condition is the opposite → negate.
+            OpCode::JumpIfEq | OpCode::JumpIfLe | OpCode::JumpIfLt => {
+                self.hir.exprs.negate_condition(cond)
+            }
+            // JumpXEqK*: lift_bool_condition returns the jump condition.
+            // Source condition is the opposite → always negate.
+            OpCode::JumpXEqKNil | OpCode::JumpXEqKB | OpCode::JumpXEqKN | OpCode::JumpXEqKS => {
+                self.hir.exprs.negate_condition(cond)
+            }
+            // Negated-sense jumps: jump fires when comparison is NOT met.
+            // lift_bool_condition returns the positive comparison, which IS
+            // the source condition. No negation needed.
+            _ => cond,
+        }
+    }
+
     /// Negate a comparison expression (flip Eq↔Ne, Lt↔Ge, Le↔Gt).
-    /// Used when a JumpXEqK* bail-out jump in an AND chain needs inversion.
     fn negate_comparison(&mut self, expr_id: ExprId, _pc: usize) -> ExprId {
         self.hir.exprs.negate_condition(expr_id)
     }

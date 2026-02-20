@@ -73,24 +73,30 @@ pub fn is_chain_barrier(insn: &Instruction) -> bool {
     )
 }
 
-/// Check if an instruction is a negated conditional jump (the "if not cond" family).
+/// Check if an instruction is a conditional jump that can serve as the leading
+/// jump of a ternary expression (`cond and b or c` / `cond and b or c`).
 ///
-/// These are used as the leading jump in value ternaries and and-or ternaries:
-/// `JumpIfNot` tests truthiness, `JumpIfNotEq/Le/Lt` test comparisons,
-/// `JumpXEqK*` with NOT flag clear tests equality (jump if equal → negated).
-/// All produce the same structural pattern: jump over true-value to false-value.
+/// In a ternary, the leading jump skips to the false/fallback value when the
+/// source-level condition is false. Both "negated" opcodes (JumpIfNot, JumpIfNotEq)
+/// and "positive" opcodes (JumpIfEq, JumpXEqK* with either polarity) can fill
+/// this role — they just encode different source conditions.
+///
+/// The lifter resolves the actual condition from the opcode + AUX flags.
 pub fn is_negated_conditional_jump(insn: &Instruction) -> bool {
-    match insn.op {
-        OpCode::JumpIfNot | OpCode::JumpIfNotEq | OpCode::JumpIfNotLe | OpCode::JumpIfNotLt => {
-            true
-        }
-        // JumpXEqK* with NOT flag clear: "jump if reg == value"
-        // This is the negated sense for `and` chains (source was `reg ~= value and ...`)
-        OpCode::JumpXEqKNil | OpCode::JumpXEqKB | OpCode::JumpXEqKN | OpCode::JumpXEqKS => {
-            (insn.aux >> 31) == 0
-        }
-        _ => false,
-    }
+    matches!(
+        insn.op,
+        OpCode::JumpIfNot
+            | OpCode::JumpIfNotEq
+            | OpCode::JumpIfNotLe
+            | OpCode::JumpIfNotLt
+            | OpCode::JumpIfEq
+            | OpCode::JumpIfLe
+            | OpCode::JumpIfLt
+            | OpCode::JumpXEqKNil
+            | OpCode::JumpXEqKB
+            | OpCode::JumpXEqKN
+            | OpCode::JumpXEqKS
+    )
 }
 
 /// Check if an instruction writes to a specific register.
