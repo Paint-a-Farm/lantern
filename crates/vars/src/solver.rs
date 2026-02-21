@@ -423,6 +423,44 @@ fn bind_scope_initializers(
                             }
                         }
                     }
+
+                    // General backward scan: the Luau compiler may batch multiple
+                    // local assignments (e.g., `local a = t[i]; local b = t[j]`)
+                    // before opening their scopes. The scope starts after the last
+                    // assignment in the batch, creating gaps of 3+ PCs.
+                    //
+                    // Find the nearest def of this register before scope_start
+                    // with no intervening uses. Limit to 8 PCs to avoid matching
+                    // unrelated temporaries from earlier in the function.
+                    if !def_var_has_named_for_scope(def_var, func, register, scope_start, accesses) {
+                        let min_pc = scope_start.saturating_sub(8);
+                        // Find the nearest def before scope_start (largest PC < scope_start)
+                        let nearest_def = reg_accesses.iter()
+                            .filter(|a| a.is_def && a.reg.pc >= min_pc && a.reg.pc < scope_start)
+                            .max_by_key(|a| a.reg.pc);
+                        if let Some(def_access) = nearest_def {
+                            if !def_var_has_named(def_var, func, &def_access.reg) {
+                                let has_intervening_use = reg_accesses.iter().any(|a| {
+                                    !a.is_def
+                                        && a.reg.pc > def_access.reg.pc
+                                        && a.reg.pc < scope_start
+                                });
+                                if !has_intervening_use {
+                                    let var_id = find_existing_scope_var(func, register, scope_name, scope_start, def_var, accesses)
+                                        .unwrap_or_else(|| {
+                                            let mut info = VarInfo::new();
+                                            info.name = Some(scope_name.to_string());
+                                            func.vars.alloc(info)
+                                        });
+                                    let info = func.vars.get_mut(var_id);
+                                    if !info.def_pcs.contains(&def_access.reg.pc) {
+                                        info.def_pcs.push(def_access.reg.pc);
+                                    }
+                                    def_var.insert(def_access.reg, var_id);
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
