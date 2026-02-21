@@ -1,3 +1,4 @@
+use petgraph::algo::dominators::simple_fast;
 use petgraph::stable_graph::NodeIndex;
 use petgraph::Direction;
 use rustc_hash::FxHashMap;
@@ -160,8 +161,10 @@ pub fn recover_variables(func: &mut HirFunc, scopes: &ScopeTree, num_params: u8)
 
     // Phase 4: Resolve unscopped uses by finding their reaching def.
     // For each unresolved use of register R at PC p, find the latest
-    // def of R at PC < p (strict less-than because reads happen before
-    // writes within the same instruction).
+    // def of R at PC < p that can actually reach the use through the CFG.
+    //
+    // A def in one branch of an if/else CANNOT reach a use in the sibling
+    // branch — only defs in dominating blocks (ancestors in the CFG) are valid.
     let mut unresolved_uses: Vec<RegRef> = Vec::new();
     for access in &accesses {
         if !access.is_def && !use_var.contains_key(&access.reg) {
@@ -185,16 +188,50 @@ pub fn recover_variables(func: &mut HirFunc, scopes: &ScopeTree, num_params: u8)
         defs.sort_by_key(|(pc, _)| *pc);
     }
 
+    // Build dominator tree to filter reaching-defs.
+    // A def in block D can only reach a use in block U if D dominates U
+    // (i.e., D is on every path from the entry to U). This prevents defs
+    // in sibling branches from incorrectly "reaching" across branches.
+    //
+    // Example: LOADB R3, false in block 0; Call into R3 in block 1 (then-branch);
+    // Return R3 in block 2 (else-branch). Block 1 does NOT dominate block 2,
+    // so the Call def is filtered out; the LOADB def in block 0 is used.
+    let entry = func.cfg.node_indices().next();
+    let doms = entry.map(|e| simple_fast(&func.cfg, e));
+
     for use_ref in &unresolved_uses {
         if let Some(defs) = reaching_defs.get(&use_ref.register) {
-            // Find the latest def strictly before this use.
-            // Strict < because within a single instruction, reads happen
-            // before writes (e.g., CALL reads r0 as function then writes r0
-            // as result — the use at PC 5 should resolve to def at PC 3).
+            let use_block = find_node_containing_pc(func, use_ref.pc);
+
+            // Find the latest def strictly before this use whose block
+            // dominates the use block.
             let var_id = defs
                 .iter()
                 .rev()
-                .find(|(def_pc, _)| *def_pc < use_ref.pc)
+                .find(|(def_pc, _)| {
+                    if *def_pc >= use_ref.pc {
+                        return false;
+                    }
+                    let def_block = find_node_containing_pc(func, *def_pc);
+                    match (def_block, use_block, &doms) {
+                        (Some(d), Some(u), Some(dom_tree)) => {
+                            if d == u {
+                                true // Same block — always dominates
+                            } else {
+                                // Check if d dominates u by walking up the dominator tree
+                                let mut current = Some(u);
+                                while let Some(node) = current {
+                                    if node == d {
+                                        return true;
+                                    }
+                                    current = dom_tree.immediate_dominator(node);
+                                }
+                                false
+                            }
+                        }
+                        _ => true, // Fallback: allow if no dominator info
+                    }
+                })
                 .map(|(_, vid)| *vid);
             if let Some(vid) = var_id {
                 use_var.insert(*use_ref, vid);
