@@ -36,6 +36,15 @@ fn transform_stmts(func: &mut HirFunc, stmts: Vec<HirStmt>) -> Vec<HirStmt> {
     let mut result = Vec::with_capacity(stmts.len());
     for stmt in stmts {
         let stmt = transform_stmt(func, stmt);
+        // Remove empty if-then-end statements (no body, no elseif, no else).
+        // These are artifacts from the structurer or inliner — the original source
+        // never had empty ifs (the compiler doesn't generate them).
+        if matches!(&stmt, HirStmt::If {
+            then_body, elseif_clauses, else_body, ..
+        } if then_body.is_empty() && elseif_clauses.is_empty() && else_body.is_none())
+        {
+            continue;
+        }
         result.push(stmt);
     }
     // Merge consecutive early-exit guards (if cond then continue/break end)
@@ -80,6 +89,14 @@ fn transform_stmt(func: &mut HirFunc, stmt: HirStmt) -> HirStmt {
             if_stmt = normalize_inverted_elseif(func, if_stmt);
             if_stmt = merge_compound_conditions(func, if_stmt);
             if_stmt = flip_elseif_guard(func, if_stmt);
+
+            // Strip trailing empty elseif clauses (artifact of structuring).
+            if let HirStmt::If { condition, then_body, mut elseif_clauses, else_body } = if_stmt {
+                while elseif_clauses.last().is_some_and(|c| c.body.is_empty()) {
+                    elseif_clauses.pop();
+                }
+                if_stmt = HirStmt::If { condition, then_body, elseif_clauses, else_body };
+            }
 
             if_stmt
         }

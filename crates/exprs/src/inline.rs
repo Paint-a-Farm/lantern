@@ -86,10 +86,12 @@ fn inline_pass(func: &mut HirFunc) -> usize {
         });
     }
 
-    // Post-structuring (and general): prevent inlining variables that are the
-    // sole statement in a conditional body (If then/else/elseif, While, etc.)
+    // Post-structuring (and general): prevent inlining variables that would
+    // leave a conditional body empty (If then/else/elseif, While, etc.)
     if !single_use.is_empty() {
-        let sole_body_vars = find_sole_body_candidates(func, &single_use);
+        let sole_body_vars = find_sole_body_candidates(
+            func, &single_use, &dead_stores, &dead_calls, &dead_call_extracts,
+        );
         for var_id in &sole_body_vars {
             single_use.remove(var_id);
         }
@@ -264,37 +266,81 @@ fn apply_removals(
     result
 }
 
-/// Find single-use candidates that are the sole statement in a conditional body.
-/// Removing these would leave the body empty, producing `if cond then end`.
+/// Find single-use candidates that would leave a conditional body empty if removed.
+///
+/// If ALL statements in a conditional body (if-then, elseif, else, while, for, etc.)
+/// would be fully removed (single_use or dead_store — NOT dead_calls which become
+/// ExprStmts), protect the last single-use candidate from inlining so the body
+/// isn't emptied.
 fn find_sole_body_candidates(
     func: &HirFunc,
     single_use: &FxHashMap<VarId, ExprId>,
+    dead_stores: &FxHashSet<VarId>,
+    _dead_calls: &FxHashSet<VarId>,
+    _dead_call_extracts: &FxHashSet<VarId>,
 ) -> FxHashSet<VarId> {
     let mut result = FxHashSet::default();
     for node_idx in func.cfg.node_indices() {
-        check_sole_body_stmts(&func.cfg[node_idx].stmts, single_use, false, &mut result);
+        check_sole_body_stmts(
+            &func.cfg[node_idx].stmts,
+            single_use,
+            dead_stores,
+            false,
+            &mut result,
+        );
     }
     result
 }
 
-/// Recursively check nested statement lists for sole-statement candidates.
+/// Check if a statement would be fully removed (not transformed) by the inline pass.
+/// dead_calls become ExprStmts (not removed), so they don't count.
+fn is_fully_removed(
+    stmt: &HirStmt,
+    single_use: &FxHashMap<VarId, ExprId>,
+    dead_stores: &FxHashSet<VarId>,
+) -> bool {
+    if let HirStmt::Assign {
+        target: LValue::Local(var_id),
+        ..
+    } = stmt
+    {
+        single_use.contains_key(var_id) || dead_stores.contains(var_id)
+    } else {
+        false
+    }
+}
+
+/// Recursively check nested statement lists for candidates that would empty a body.
 /// `in_conditional_body` is true when we're inside an If/While/Repeat/For body.
 fn check_sole_body_stmts(
     stmts: &[HirStmt],
     single_use: &FxHashMap<VarId, ExprId>,
+    dead_stores: &FxHashSet<VarId>,
     in_conditional_body: bool,
     result: &mut FxHashSet<VarId>,
 ) {
-    // If we're in a conditional body and the ENTIRE body is a single candidate
-    // assignment, flag it.
-    if in_conditional_body && stmts.len() == 1 {
-        if let HirStmt::Assign {
-            target: LValue::Local(var_id),
-            ..
-        } = &stmts[0]
-        {
-            if single_use.contains_key(var_id) {
-                result.insert(*var_id);
+    // If we're in a conditional body and ALL statements would be fully removed,
+    // protect the last single-use candidate to keep the body non-empty.
+    if in_conditional_body && !stmts.is_empty() {
+        let all_removable = stmts.iter().all(|s| {
+            is_fully_removed(s, single_use, dead_stores)
+        });
+        if all_removable {
+            // Find the last single-use candidate and protect it.
+            // Dead stores are side-effect-free removals — can't be kept as statements.
+            // Single-use candidates ARE used elsewhere, so keeping the assignment is
+            // preferable to emptying the body.
+            for stmt in stmts.iter().rev() {
+                if let HirStmt::Assign {
+                    target: LValue::Local(var_id),
+                    ..
+                } = stmt
+                {
+                    if single_use.contains_key(var_id) {
+                        result.insert(*var_id);
+                        break;
+                    }
+                }
             }
         }
     }
@@ -308,19 +354,19 @@ fn check_sole_body_stmts(
                 else_body,
                 ..
             } => {
-                check_sole_body_stmts(then_body, single_use, true, result);
+                check_sole_body_stmts(then_body, single_use, dead_stores, true, result);
                 for clause in elseif_clauses {
-                    check_sole_body_stmts(&clause.body, single_use, true, result);
+                    check_sole_body_stmts(&clause.body, single_use, dead_stores, true, result);
                 }
                 if let Some(body) = else_body {
-                    check_sole_body_stmts(body, single_use, true, result);
+                    check_sole_body_stmts(body, single_use, dead_stores, true, result);
                 }
             }
             HirStmt::While { body, .. } | HirStmt::Repeat { body, .. } => {
-                check_sole_body_stmts(body, single_use, true, result);
+                check_sole_body_stmts(body, single_use, dead_stores, true, result);
             }
             HirStmt::NumericFor { body, .. } | HirStmt::GenericFor { body, .. } => {
-                check_sole_body_stmts(body, single_use, true, result);
+                check_sole_body_stmts(body, single_use, dead_stores, true, result);
             }
             _ => {}
         }
