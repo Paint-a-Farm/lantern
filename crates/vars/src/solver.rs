@@ -26,7 +26,7 @@ pub fn recover_variables(func: &mut HirFunc, scopes: &ScopeTree, num_params: u8)
     // its "self" parameter registered for correct colon-syntax detection).
     if accesses.is_empty() {
         for i in 0..num_params {
-            let name = scopes.lookup(i, 0).map(|s| s.to_string());
+            let name = lookup_param_name(scopes, i);
             let mut info = VarInfo::new();
             info.name = name;
             info.is_param = true;
@@ -53,19 +53,23 @@ pub fn recover_variables(func: &mut HirFunc, scopes: &ScopeTree, num_params: u8)
     }
 
     // Phase 2: Create parameter variables first (r0..r{num_params-1})
+    //
+    // For non-vararg functions, parameter scopes start at PC 0.
+    // For vararg functions (PREPVARARGS at PC 0), parameter scopes start at PC 1.
+    // We find the parameter name from the earliest scope for each register.
     for i in 0..num_params {
-        let name = scopes.lookup(i, 0).map(|s| s.to_string());
+        let name = lookup_param_name(scopes, i);
         let mut info = VarInfo::new();
         info.name = name;
         info.is_param = true;
         let var_id = func.vars.alloc(info);
         func.params.push(var_id);
         // Bind all accesses to this param register that fall within its scope
+        let param_name = lookup_param_name(scopes, i);
         if let Some(reg_accesses) = by_register.get(&i) {
             for access in reg_accesses {
                 let scope_name = scopes.lookup(i, access.reg.pc);
-                let param_name = scopes.lookup(i, 0);
-                if scope_name == param_name && param_name.is_some() {
+                if scope_name.is_some() && scope_name == param_name.as_deref() {
                     if access.is_def {
                         def_var.insert(access.reg, var_id);
                     } else {
@@ -264,41 +268,6 @@ fn find_scope(scopes: &ScopeTree, register: u8, pc: usize) -> Option<(&str, usiz
     best.map(|(name, start, _)| (name, start))
 }
 
-/// Find the scope for a register that starts after the given PC (strict mode).
-///
-/// Only used for table constructor defs where the pattern is unambiguous:
-/// DupTable/NewTable at PC X, SETTABLEKS fields follow, scope starts after
-/// all fields are set.
-///
-/// For non-table defs, use the CFG-based `bind_prescope_defs_via_cfg` instead.
-fn find_next_scope_after_strict<'a>(
-    scopes: &'a ScopeTree,
-    register: u8,
-    pc: usize,
-    reg_accesses: &[&RegAccess],
-) -> Option<(&'a str, usize)> {
-    // Find the nearest scope starting after this def's PC
-    let mut best: Option<(&str, usize)> = None;
-    for scope in scopes.scopes_for_register(register) {
-        if scope.pc_range.start > pc {
-            if best.map_or(true, |(_, s)| scope.pc_range.start < s) {
-                best = Some((&scope.name, scope.pc_range.start));
-            }
-        }
-    }
-
-    let (_, scope_start) = best?;
-
-    // No uses between def and scope start
-    let has_intervening_use = reg_accesses
-        .iter()
-        .any(|a| !a.is_def && a.reg.pc > pc && a.reg.pc < scope_start);
-    if has_intervening_use {
-        return None;
-    }
-
-    best
-}
 
 /// Bind defining instructions to their scopes using compiler invariants.
 ///
@@ -393,26 +362,30 @@ fn bind_scope_initializers(
             });
             if !already_bound {
                 if let Some(reg_accesses) = by_register.get(&register) {
-                    // Try table constructor pattern
-                    if let Some(scope_result) = find_next_scope_after_strict(scopes, register, 0, reg_accesses) {
-                        if scope_result.1 == scope_start {
-                            for access in reg_accesses.iter() {
-                                if access.is_def && access.is_table_def && access.reg.pc < scope_start {
-                                    if !def_var_has_named(def_var, func, &access.reg) {
-                                        let var_id = find_existing_scope_var(func, register, scope_name, scope_start, def_var, accesses)
-                                            .unwrap_or_else(|| {
-                                                let mut info = VarInfo::new();
-                                                info.name = Some(scope_name.to_string());
-                                                func.vars.alloc(info)
-                                            });
-                                        let info = func.vars.get_mut(var_id);
-                                        if !info.def_pcs.contains(&access.reg.pc) {
-                                            info.def_pcs.push(access.reg.pc);
-                                        }
-                                        def_var.insert(access.reg, var_id);
-                                        break;
-                                    }
+                    // Try table constructor pattern: find a table def before scope_start
+                    // with no intervening uses of this register.
+                    'table_search: for access in reg_accesses.iter() {
+                        if access.is_def && access.is_table_def && access.reg.pc < scope_start {
+                            if !def_var_has_named(def_var, func, &access.reg) {
+                                // Verify no uses between def and scope start
+                                let has_intervening_use = reg_accesses.iter().any(|a| {
+                                    !a.is_def && a.reg.pc > access.reg.pc && a.reg.pc < scope_start
+                                });
+                                if has_intervening_use {
+                                    continue;
                                 }
+                                let var_id = find_existing_scope_var(func, register, scope_name, scope_start, def_var, accesses)
+                                    .unwrap_or_else(|| {
+                                        let mut info = VarInfo::new();
+                                        info.name = Some(scope_name.to_string());
+                                        func.vars.alloc(info)
+                                    });
+                                let info = func.vars.get_mut(var_id);
+                                if !info.def_pcs.contains(&access.reg.pc) {
+                                    info.def_pcs.push(access.reg.pc);
+                                }
+                                def_var.insert(access.reg, var_id);
+                                break 'table_search;
                             }
                         }
                     }
@@ -621,6 +594,18 @@ fn bind_prescope_defs_via_cfg(
             }
         }
     }
+}
+
+/// Look up a parameter's name from debug scopes.
+///
+/// For non-vararg functions, parameter scopes start at PC 0.
+/// For vararg functions (PREPVARARGS at PC 0), parameter scopes start at PC 1.
+/// We find the earliest scope for the register, which is the parameter name.
+fn lookup_param_name(scopes: &ScopeTree, register: u8) -> Option<String> {
+    scopes
+        .scopes_for_register(register)
+        .min_by_key(|s| s.pc_range.start)
+        .map(|s| s.name.clone())
 }
 
 /// Find the CFG node that contains the given PC.
