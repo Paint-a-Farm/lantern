@@ -179,6 +179,14 @@ pub fn tail_loads_register(
         if is_chain_barrier(insn) || conditional_jump_target(insn, pc).is_some() {
             return false;
         }
+
+        // A Call with C=1 (0 return values) is a side-effect-only call, not a
+        // value producer. In a real `a and func()` chain the call must return a
+        // value (C >= 2). A void call in the tail means this is an if-body, not
+        // a chain segment.
+        if insn.op == OpCode::Call && insn.c == 1 {
+            return false;
+        }
     }
     found_load
 }
