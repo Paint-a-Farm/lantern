@@ -7,7 +7,7 @@ use lantern_hir::arena::ExprId;
 use lantern_hir::cfg::{EdgeKind, Terminator};
 use lantern_hir::expr::HirExpr;
 use lantern_hir::stmt::{ElseIfClause, HirStmt, LValue};
-use lantern_hir::types::LuaValue;
+use lantern_hir::types::{BinOp, LuaValue};
 
 use super::precedence::binop_str;
 use super::LuaEmitter;
@@ -149,9 +149,7 @@ impl<'a> LuaEmitter<'a> {
             }
 
             HirStmt::ExprStmt(expr) => {
-                self.write_indent();
-                self.emit_expr(*expr);
-                self.output.push('\n');
+                self.emit_expr_stmt(*expr);
             }
 
             HirStmt::Return(values) => {
@@ -394,6 +392,128 @@ impl<'a> LuaEmitter<'a> {
         self.indent += 1;
         self.emit_stmts(&clause.body);
         self.indent -= 1;
+    }
+
+    /// Emit an expression used as a statement.
+    ///
+    /// Converts `and`/`or` expressions into `if` statements since Luau only
+    /// allows function calls as expression statements.
+    ///
+    /// Patterns:
+    ///   `a and b`         → `if a then <b> end`
+    ///   `a or b`          → `if not a then <b> end`
+    ///   `a and b or c`    → `if a then <b> else <c> end`
+    ///   `Call(Closure, ..)` → `(function() ... end)(args)` (IIFE needs parens)
+    fn emit_expr_stmt(&mut self, expr: ExprId) {
+        match self.func.exprs.get(expr) {
+            HirExpr::Binary { op: BinOp::Or, left, right } => {
+                let (left, right) = (*left, *right);
+                // Check for ternary: `(a and b) or c`
+                //
+                // When used as a statement, only `c` has side effects — `a` and `b`
+                // are just conditions. The Luau compiler generates this from:
+                //   `if not a or not b then c() end`
+                // So we emit: `if not (a and b) then c end`
+                //
+                // Only decompose as if/then/else when BOTH branches are calls
+                // (i.e., both have side effects worth executing).
+                if let HirExpr::Binary { op: BinOp::And, left: cond, right: then_expr } =
+                    self.func.exprs.get(left)
+                {
+                    let (cond, then_expr) = (*cond, *then_expr);
+                    let then_is_call = self.expr_is_call_like(then_expr);
+                    let else_is_call = self.expr_is_call_like(right);
+
+                    if then_is_call && else_is_call {
+                        // Both branches are calls: `if a then call1() else call2() end`
+                        self.write_indent();
+                        self.output.push_str("if ");
+                        self.emit_expr(cond);
+                        self.output.push_str(" then\n");
+                        self.indent += 1;
+                        self.emit_expr_stmt(then_expr);
+                        self.indent -= 1;
+                        self.write_indent();
+                        self.output.push_str("else\n");
+                        self.indent += 1;
+                        self.emit_expr_stmt(right);
+                        self.indent -= 1;
+                        self.write_indent();
+                        self.output.push_str("end\n");
+                    } else if then_is_call {
+                        // Only then-branch is a call: `if a then call() end`
+                        // `b` was the condition for `c`, drop the else
+                        self.write_indent();
+                        self.output.push_str("if ");
+                        self.emit_expr(cond);
+                        self.output.push_str(" then\n");
+                        self.indent += 1;
+                        self.emit_expr_stmt(then_expr);
+                        self.indent -= 1;
+                        self.write_indent();
+                        self.output.push_str("end\n");
+                    } else {
+                        // then-branch is not a call (it's a condition check):
+                        // `(a and b) or c` → `if not (a and b) then c end`
+                        self.write_indent();
+                        self.output.push_str("if not (");
+                        self.emit_expr(cond);
+                        self.output.push_str(" and ");
+                        self.emit_expr(then_expr);
+                        self.output.push_str(") then\n");
+                        self.indent += 1;
+                        self.emit_expr_stmt(right);
+                        self.indent -= 1;
+                        self.write_indent();
+                        self.output.push_str("end\n");
+                    }
+                } else {
+                    // `a or b` → `if not a then b end`
+                    self.write_indent();
+                    self.output.push_str("if not ");
+                    self.emit_expr_parens(left, super::precedence::Precedence::UNARY);
+                    self.output.push_str(" then\n");
+                    self.indent += 1;
+                    self.emit_expr_stmt(right);
+                    self.indent -= 1;
+                    self.write_indent();
+                    self.output.push_str("end\n");
+                }
+            }
+            HirExpr::Binary { op: BinOp::And, left, right } => {
+                let (left, right) = (*left, *right);
+                self.write_indent();
+                self.output.push_str("if ");
+                self.emit_expr(left);
+                self.output.push_str(" then\n");
+                self.indent += 1;
+                self.emit_expr_stmt(right);
+                self.indent -= 1;
+                self.write_indent();
+                self.output.push_str("end\n");
+            }
+            _ => {
+                // Regular expression statement (function call, etc.)
+                // Non-call expressions here indicate an upstream issue (lost assignment
+                // target from ternary decomposition), but we emit them as-is to
+                // preserve semantic information.
+                self.write_indent();
+                self.emit_expr(expr);
+                self.output.push('\n');
+            }
+        }
+    }
+
+    /// Check if an expression is a call (or contains one through And/Or chains).
+    fn expr_is_call_like(&self, expr: ExprId) -> bool {
+        match self.func.exprs.get(expr) {
+            HirExpr::Call { .. } | HirExpr::MethodCall { .. } => true,
+            HirExpr::Binary { op: BinOp::And, right, .. }
+            | HirExpr::Binary { op: BinOp::Or, right, .. } => {
+                self.expr_is_call_like(*right)
+            }
+            _ => false,
+        }
     }
 
     pub(super) fn emit_lvalue(&mut self, lv: &LValue) {

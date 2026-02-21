@@ -641,7 +641,7 @@ fn count_uses_in_stmt(
 }
 
 /// Check if an expression has observable side effects (calls, etc.).
-fn expr_has_side_effects(func: &HirFunc, expr_id: ExprId) -> bool {
+pub(crate) fn expr_has_side_effects(func: &HirFunc, expr_id: ExprId) -> bool {
     match func.exprs.get(expr_id) {
         HirExpr::Call { .. } | HirExpr::MethodCall { .. } => true,
         HirExpr::Binary { left, right, .. } => {

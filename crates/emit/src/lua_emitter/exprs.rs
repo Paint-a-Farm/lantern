@@ -83,7 +83,15 @@ impl<'a> LuaEmitter<'a> {
             }
 
             HirExpr::Call { func, args, .. } => {
+                // Closures need explicit parens for IIFE: (function() ... end)(args)
+                let needs_parens = matches!(self.func.exprs.get(*func), HirExpr::Closure { .. });
+                if needs_parens {
+                    self.output.push('(');
+                }
                 self.emit_expr_parens(*func, Precedence::POSTFIX);
+                if needs_parens {
+                    self.output.push(')');
+                }
                 self.output.push('(');
                 for (i, arg) in args.iter().enumerate() {
                     if i > 0 {

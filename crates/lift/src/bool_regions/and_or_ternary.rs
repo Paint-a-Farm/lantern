@@ -113,6 +113,10 @@ fn find_and_or_ternaries(instructions: &[Instruction]) -> Vec<AndOrTernary> {
                         scan += if has_aux_word(scan_insn.op) { 2 } else { 1 };
                         continue;
                     }
+                    // A conditional jump with a different target means nested control
+                    // flow (e.g. `if cond then <body with inner if> end`), not a flat
+                    // ternary expression. Stop scanning.
+                    break;
                 }
 
                 // Check for the JumpIf (the "or" part).
@@ -120,9 +124,18 @@ fn find_and_or_ternaries(instructions: &[Instruction]) -> Vec<AndOrTernary> {
                     let or_reg = scan_insn.a;
                     let join_pc = ((scan + 1) as i64 + scan_insn.d as i64) as usize;
 
+                    // The true branch (between the leading condition and the JumpIf)
+                    // must be a simple value load — no side effects allowed.
+                    let true_start = if let Some(&last_cpc) = compound_jump_pcs.last() {
+                        last_cpc + if has_aux_word(instructions[last_cpc].op) { 2 } else { 1 }
+                    } else {
+                        scan_start
+                    };
+
                     // The join point must be past the fallback (skip the "c" value),
-                    // and the fallback must simply load a value into the same register.
+                    // and both branches must simply load a value into the result register.
                     if join_pc > fallback_pc
+                        && !tail_has_side_effects(instructions, true_start, scan)
                         && tail_loads_register(instructions, fallback_pc, join_pc, or_reg)
                         && !tail_has_side_effects(instructions, fallback_pc, join_pc)
                         && scan + 1 <= fallback_pc

@@ -214,6 +214,8 @@ fn main() {
                     lantern_exprs::eliminate_temporaries(&mut hir);
                     lantern_exprs::fold_table_constructors(&mut hir);
                     lantern_exprs::eliminate_temporaries(&mut hir);
+                    // Branch-local inlining: handles temps reused across if/else branches
+                    lantern_exprs::inline_branch_locals(&mut hir);
                 });
                 func_timings.record(PHASE_PATTERNS, patterns_duration);
             }
