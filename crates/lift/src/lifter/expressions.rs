@@ -154,14 +154,17 @@ impl<'a> super::Lifter<'a> {
         value: ExprId,
         pc: usize,
     ) -> bool {
-        // Find the Table expression ID assigned to this register
+        // Find the Table expression ID assigned to this register, and track
+        // which registers were assigned between the table def and now.
         let stmts = &self.hir.cfg[self.current_block].stmts;
         let mut table_expr_id = None;
-        for stmt in stmts.iter().rev() {
+        let mut table_stmt_idx = 0;
+        for (idx, stmt) in stmts.iter().enumerate().rev() {
             if let HirStmt::RegAssign { target, value: v } = stmt {
                 if target.register == table_reg {
                     if matches!(self.hir.exprs.get(*v), HirExpr::Table { .. }) {
                         table_expr_id = Some(*v);
+                        table_stmt_idx = idx;
                     }
                     break;
                 }
@@ -169,6 +172,23 @@ impl<'a> super::Lifter<'a> {
         }
 
         if let Some(expr_id) = table_expr_id {
+            // Check if the value register was assigned AFTER the table def.
+            // If so, the value depends on something computed after the table
+            // constructor, so folding would create a use-before-def.
+            let value_reg = match self.hir.exprs.get(value) {
+                HirExpr::Reg(rr) => Some(rr.register),
+                _ => None,
+            };
+            if let Some(vreg) = value_reg {
+                for stmt in &stmts[table_stmt_idx + 1..] {
+                    if let HirStmt::RegAssign { target, .. } = stmt {
+                        if target.register == vreg {
+                            return false; // Value register was redefined after table
+                        }
+                    }
+                }
+            }
+
             let key = self.alloc_expr(
                 HirExpr::Literal(LuaValue::String(field.as_bytes().to_vec())),
                 pc,
