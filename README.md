@@ -158,7 +158,7 @@ Both lantern and medal target Luau bytecode decompilation. Medal is a mature, ge
 
 - **No identity bugs**: The constraint solver respects debug scope boundaries as hard constraints. Register reuse across scopes (the "kioskMode bug") is impossible by construction.
 - **Fewer unnamed temporaries**: Branch-local inlining eliminates temps that medal's global use-count analysis misses. Across the full FS25 corpus: 125 remaining `local _v = nil` vs medal's ~152 unnamed temps.
-- **Syntactically valid output**: 1 SyntaxError across all FS25 scripts (a bracket-indexed method definition edge case). Medal produces a handful of syntax issues in complex files.
+- **Syntactically valid output**: 0 SyntaxErrors across all FS25 scripts. Medal produces a handful of syntax issues in complex files.
 - **Simpler codebase**: No Arc/Mutex, no nightly Rust, no SSA construction/destruction phases. Easier to understand and extend.
 - **Faster builds**: Stable Rust, fewer dependencies, no nightly feature gates. Debug builds complete in <1 second incremental.
 
@@ -259,7 +259,7 @@ cargo build --release  # optimized build
 
 Lantern successfully decompiles all script files in the FS25 base game. Output quality metrics across the full corpus:
 
-- **SyntaxErrors** (via luau-analyze): 1 (a bracket-indexed method definition edge case)
+- **SyntaxErrors** (via luau-analyze): 0
 - **Remaining nil-initialized temps** (`local _v = nil`): 125
 - **Empty if-then-end blocks**: 0
 - **Total unnamed temporaries**: ~1,100

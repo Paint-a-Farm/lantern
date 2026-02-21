@@ -356,6 +356,11 @@ impl<'a> LuaEmitter<'a> {
                     Some(s) => s,
                     None => return false, // Can't form valid qualified name
                 };
+                // Lua syntax forbids bracket indexing in function definition paths:
+                // `function a.b[3].c() end` is invalid, must use assignment form instead.
+                if table_str.contains('[') {
+                    return false;
+                }
                 (format!("{}{}{}", table_str, separator, field), "")
             }
             LValue::Global(name) => (name.clone(), ""),
