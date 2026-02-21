@@ -1,0 +1,14 @@
+[package]
+name = "lantern"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lantern-bytecode = { path = "../bytecode" }
+lantern-hir = { path = "../hir" }
+lantern-lift = { path = "../lift" }
+lantern-vars = { path = "../vars" }
+lantern-structure = { path = "../structure" }
+lantern-exprs = { path = "../exprs" }
+lantern-emit = { path = "../emit" }
+stylua = { workspace = true }

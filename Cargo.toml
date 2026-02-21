@@ -9,6 +9,7 @@ members = [
     "crates/structure",
     "crates/exprs",
     "crates/emit",
+    "crates/lantern",
     "crates/cli",
 ]
 
