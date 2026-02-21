@@ -201,6 +201,13 @@ pub fn tail_has_side_effects(instructions: &[Instruction], from: usize, to: usiz
         if is_chain_barrier(insn) || conditional_jump_target(insn, pc).is_some() {
             return true;
         }
+
+        // A Call with C=1 (0 return values) is a side-effect-only call (e.g.
+        // error logging).  It must not appear inside a value expression — its
+        // presence means this range is an imperative body, not a value load.
+        if insn.op == OpCode::Call && insn.c == 1 {
+            return true;
+        }
     }
     false
 }
