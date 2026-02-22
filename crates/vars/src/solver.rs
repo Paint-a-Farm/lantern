@@ -362,18 +362,13 @@ fn bind_scope_initializers(
             });
             if !already_bound {
                 if let Some(reg_accesses) = by_register.get(&register) {
-                    // Try table constructor pattern: find a table def before scope_start
-                    // with no intervening uses of this register.
+                    // Try table constructor pattern: find a table def before scope_start.
+                    // Table initialization (DupTable/NewTable + SetTableKS) creates uses
+                    // of the register between def and scope start — these are expected
+                    // and should NOT block matching.
                     'table_search: for access in reg_accesses.iter() {
                         if access.is_def && access.is_table_def && access.reg.pc < scope_start {
                             if !def_var_has_named(def_var, func, &access.reg) {
-                                // Verify no uses between def and scope start
-                                let has_intervening_use = reg_accesses.iter().any(|a| {
-                                    !a.is_def && a.reg.pc > access.reg.pc && a.reg.pc < scope_start
-                                });
-                                if has_intervening_use {
-                                    continue;
-                                }
                                 let var_id = find_existing_scope_var(func, register, scope_name, scope_start, def_var, accesses)
                                     .unwrap_or_else(|| {
                                         let mut info = VarInfo::new();
@@ -392,20 +387,11 @@ fn bind_scope_initializers(
 
                     // Try closure pattern: NewClosure/DupClosure at PC N followed
                     // by CAPTURE instructions, with scope starting after the last
-                    // capture. The gap between def and scope can be large (one PC
-                    // per captured upvalue).
+                    // capture. CAPTURE instructions create uses of registers for
+                    // upvalue captures — these are expected and should not block matching.
                     if !def_var_has_named_for_scope(def_var, func, register, scope_start, accesses) {
                         for access in reg_accesses.iter() {
                             if access.is_def && access.is_closure_def && access.reg.pc < scope_start {
-                                // Verify no uses of this register between def and scope start
-                                let has_intervening_use = reg_accesses.iter().any(|a| {
-                                    !a.is_def
-                                        && a.reg.pc > access.reg.pc
-                                        && a.reg.pc < scope_start
-                                });
-                                if has_intervening_use {
-                                    continue;
-                                }
                                 if !def_var_has_named(def_var, func, &access.reg) {
                                     let var_id = find_existing_scope_var(func, register, scope_name, scope_start, def_var, accesses)
                                         .unwrap_or_else(|| {
@@ -424,19 +410,16 @@ fn bind_scope_initializers(
                         }
                     }
 
-                    // General backward scan: the Luau compiler may batch multiple
-                    // local assignments (e.g., `local a = t[i]; local b = t[j]`)
-                    // before opening their scopes. The scope starts after the last
-                    // assignment in the batch, creating gaps of 3+ PCs.
-                    //
-                    // Find the nearest def of this register before scope_start
-                    // with no intervening uses. Limit to 8 PCs to avoid matching
-                    // unrelated temporaries from earlier in the function.
+                    // General backward scan: the Luau compiler batches local
+                    // assignments before opening scopes. For N locals, each
+                    // taking K instructions, the first scope opens N*K PCs after
+                    // its def. No fixed window — the "no intervening use" check
+                    // prevents false matches by ensuring the value flows directly
+                    // from def to scope without being read in between.
                     if !def_var_has_named_for_scope(def_var, func, register, scope_start, accesses) {
-                        let min_pc = scope_start.saturating_sub(8);
                         // Find the nearest def before scope_start (largest PC < scope_start)
                         let nearest_def = reg_accesses.iter()
-                            .filter(|a| a.is_def && a.reg.pc >= min_pc && a.reg.pc < scope_start)
+                            .filter(|a| a.is_def && a.reg.pc < scope_start)
                             .max_by_key(|a| a.reg.pc);
                         if let Some(def_access) = nearest_def {
                             if !def_var_has_named(def_var, func, &def_access.reg) {
