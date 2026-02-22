@@ -167,6 +167,12 @@ fn main() {
 
                 let bc_func = &chunk.functions[func_idx];
 
+                if std::env::var("DEBUG_SCOPES").is_ok() && emit_func == Some(func_idx) {
+                    for scope in bc_func.debug.scopes.all_scopes() {
+                        eprintln!("  r{} '{}' pc={}..{}", scope.register, scope.name, scope.pc_range.start, scope.pc_range.end);
+                    }
+                }
+
                 let ((), vars_duration) = timing::timed(|| {
                     lantern_vars::recover_variables(
                         &mut hir,
@@ -344,6 +350,14 @@ fn dump_cfg_blocks(hir: &lantern_hir::func::HirFunc) {
             node, block.pc_range, block.stmts.len(), then_n, else_n, block.terminator);
         for (i, stmt) in block.stmts.iter().enumerate() {
             eprintln!("    stmt[{}]: {:?}", i, stmt);
+        }
+    }
+    // Dump expressions referenced by specific VarIds if DEBUG_EXPR env var is set
+    if std::env::var("DEBUG_EXPR").is_ok() {
+        eprintln!("  --- Expression Arena ---");
+        for i in 0..hir.exprs.len() {
+            let eid = lantern_hir::arena::ExprId(i as u32);
+            eprintln!("    {:?}: {:?}", eid, hir.exprs.get(eid));
         }
     }
 }

@@ -168,7 +168,14 @@ fn find_value_ternaries(instructions: &[Instruction]) -> Vec<ValueTernary> {
         }
 
         // Both branches must load into the same result register.
-        let true_last_insn = &instructions[skip_jump_pc - 1];
+        // Skip past Nop/AUX words to find the actual value-producing instruction.
+        let mut true_last_pc = skip_jump_pc - 1;
+        while true_last_pc > true_start
+            && instructions[true_last_pc].op == OpCode::Nop
+        {
+            true_last_pc -= 1;
+        }
+        let true_last_insn = &instructions[true_last_pc];
         if !writes_register(true_last_insn, true_last_insn.a) {
             pc += 1;
             continue;

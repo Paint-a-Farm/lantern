@@ -478,6 +478,9 @@ impl<'a> super::Lifter<'a> {
         });
 
         // Build: (cond1 and cond2 ...) and true_val or false_val
+        // Optimization: if false_val is nil, emit just `cond and true_val`
+        // since `x and y or nil` ≡ `x and y` (nil is falsy, so `or nil` is a no-op).
+        // This produces cleaner output when chained with another `or`.
         let and_expr = self.alloc_expr(
             HirExpr::Binary {
                 op: BinOp::And,
@@ -486,14 +489,19 @@ impl<'a> super::Lifter<'a> {
             },
             pc,
         );
-        let result_expr = self.alloc_expr(
-            HirExpr::Binary {
-                op: BinOp::Or,
-                left: and_expr,
-                right: false_operand,
-            },
-            pc,
-        );
+        let false_is_nil = matches!(self.hir.exprs.get(false_operand), HirExpr::Literal(LuaValue::Nil));
+        let result_expr = if false_is_nil {
+            and_expr
+        } else {
+            self.alloc_expr(
+                HirExpr::Binary {
+                    op: BinOp::Or,
+                    left: and_expr,
+                    right: false_operand,
+                },
+                pc,
+            )
+        };
 
         // Emit: result_reg = cond and true_val or false_val
         // Use join_pc - 1 so the variable solver's backwards lookup

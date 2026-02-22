@@ -4,7 +4,7 @@ mod expressions;
 
 use petgraph::stable_graph::NodeIndex;
 use petgraph::Direction;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use lantern_bytecode::chunk::Chunk;
 use lantern_bytecode::function::Function;
@@ -135,6 +135,7 @@ impl<'a> Lifter<'a> {
             !suppressed.contains(&t.jump_pc) && !suppressed.contains(&t.skip_jump_pc)
                 && t.compound_jump_pcs.iter().all(|&cpc| !suppressed.contains(&cpc))
         }).collect();
+        let mut suppressed_targets = FxHashSet::default();
         for t in &self.value_ternaries {
             suppressed.insert(t.jump_pc);
             suppressed.insert(t.skip_jump_pc);
@@ -147,10 +148,18 @@ impl<'a> Lifter<'a> {
                     suppressed.insert(cpc + 1);
                 }
             }
+            // Suppress ALL PCs within the value ternary range as block-start
+            // targets. External jumps may target false_val_pc, but the ternary
+            // lifter handles those PCs internally. Without this, the false
+            // branch would land in a separate block and the ternary result
+            // would be invisible to subsequent or-chains.
+            for pc in (t.jump_pc + 1)..t.join_pc {
+                suppressed_targets.insert(pc);
+            }
         }
 
         // Discover block boundaries
-        let starts = block_discovery::discover_block_starts(instructions, &suppressed);
+        let starts = block_discovery::discover_block_starts(instructions, &suppressed, &suppressed_targets);
         let ranges = block_discovery::block_ranges(&starts, instructions.len());
 
         // Create all blocks in the CFG

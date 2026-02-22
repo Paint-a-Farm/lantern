@@ -13,10 +13,15 @@ use rustc_hash::FxHashSet;
 /// `suppressed_pcs` contains PCs of instructions (e.g. conditional jumps
 /// inside boolean value computations) that should NOT create block boundaries.
 ///
+/// `suppressed_targets` contains PCs that should NEVER become block starts,
+/// even if they are jump targets. Used for PCs inside value ternaries where
+/// an external jump targets a PC that the ternary lifter handles internally.
+///
 /// Returns a sorted set of block-start PCs.
 pub fn discover_block_starts(
     instructions: &[Instruction],
     suppressed_pcs: &FxHashSet<usize>,
+    suppressed_targets: &FxHashSet<usize>,
 ) -> Vec<usize> {
     let mut starts = FxHashSet::default();
     starts.insert(0);
@@ -112,9 +117,12 @@ pub fn discover_block_starts(
         }
     }
 
-    // Remove any starts beyond instruction range
+    // Remove any starts beyond instruction range or in suppressed targets
     let len = instructions.len();
-    let mut sorted: Vec<usize> = starts.into_iter().filter(|&pc| pc < len).collect();
+    let mut sorted: Vec<usize> = starts
+        .into_iter()
+        .filter(|&pc| pc < len && !suppressed_targets.contains(&pc))
+        .collect();
     sorted.sort_unstable();
     sorted
 }
@@ -145,7 +153,7 @@ mod tests {
             Instruction { op: OpCode::Add, a: 2, b: 0, c: 1, d: 0, e: 0, aux: 0 },
             Instruction { op: OpCode::Return, a: 2, b: 2, c: 0, d: 0, e: 0, aux: 0 },
         ];
-        let starts = discover_block_starts(&insns, &FxHashSet::default());
+        let starts = discover_block_starts(&insns, &FxHashSet::default(), &FxHashSet::default());
         // Only one block: PC 0
         assert_eq!(starts, vec![0]);
     }
@@ -162,7 +170,7 @@ mod tests {
             Instruction { op: OpCode::LoadN, a: 1, b: 0, c: 0, d: 20, e: 0, aux: 0 },
             Instruction { op: OpCode::Return, a: 1, b: 2, c: 0, d: 0, e: 0, aux: 0 },
         ];
-        let starts = discover_block_starts(&insns, &FxHashSet::default());
+        let starts = discover_block_starts(&insns, &FxHashSet::default(), &FxHashSet::default());
         // Blocks: 0, 2 (fallthrough after JUMPIF), 4 (jump target)
         assert_eq!(starts, vec![0, 2, 4]);
     }
