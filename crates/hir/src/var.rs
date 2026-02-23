@@ -79,12 +79,48 @@ impl VarInfo {
     }
 
     /// Display name: debug name if available, else _v{id}.
+    /// Lua/Luau keywords are prefixed with `_` to avoid syntax errors.
     pub fn display_name(&self, id: VarId) -> String {
         match &self.name {
-            Some(n) => n.clone(),
+            Some(n) => {
+                if is_luau_keyword(n) {
+                    format!("_{}", n)
+                } else {
+                    n.clone()
+                }
+            }
             None => format!("_v{}", id.0),
         }
     }
+}
+
+fn is_luau_keyword(s: &str) -> bool {
+    // Note: `continue` is intentionally excluded — Luau treats it as a
+    // context-sensitive keyword, so it is valid as a variable name.
+    matches!(
+        s,
+        "and"
+            | "break"
+            | "do"
+            | "else"
+            | "elseif"
+            | "end"
+            | "false"
+            | "for"
+            | "function"
+            | "if"
+            | "in"
+            | "local"
+            | "nil"
+            | "not"
+            | "or"
+            | "repeat"
+            | "return"
+            | "then"
+            | "true"
+            | "until"
+            | "while"
+    )
 }
 
 /// Table of all variables in a function.

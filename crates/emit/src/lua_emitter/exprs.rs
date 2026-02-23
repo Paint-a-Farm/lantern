@@ -426,6 +426,8 @@ fn is_lua_identifier(s: &str) -> bool {
 }
 
 fn is_lua_keyword(s: &str) -> bool {
+    // Note: `continue` is intentionally excluded — Luau treats it as a
+    // context-sensitive keyword, so it is valid as an identifier / table key.
     matches!(
         s,
         "and"
@@ -449,6 +451,5 @@ fn is_lua_keyword(s: &str) -> bool {
             | "true"
             | "until"
             | "while"
-            | "continue"
     )
 }
