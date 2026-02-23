@@ -203,17 +203,16 @@ pub(super) fn structure_branch(
                         else_body: None,
                     });
                 } else if is_guard_clause(&then_stmts) && !ends_with_exit(&final_else) {
-                    // Guard clause pattern: then-body is a short early-out and
-                    // the else-body continues. Flip to:
-                    //   if not cond then <main body> end; <guard>
-                    let inv_cond = negate_condition(func, condition);
+                    // Guard clause pattern: then-body is a short early-out
+                    // (return/break) and the else-body has continuation code.
+                    // Emit as: if cond then <guard return> end; <body>
                     result.push(HirStmt::If {
-                        condition: inv_cond,
-                        then_body: final_else,
+                        condition,
+                        then_body: then_stmts,
                         elseif_clauses: Vec::new(),
                         else_body: None,
                     });
-                    result.extend(then_stmts);
+                    result.extend(final_else);
                 } else if is_guard_clause(&final_else) && !ends_with_exit(&then_stmts) {
                     // Inverse guard: else-body is the early-out, then-body continues.
                     // Emit as `if cond then <main body> end; <guard>`
