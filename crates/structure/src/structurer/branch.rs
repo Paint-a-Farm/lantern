@@ -102,12 +102,12 @@ pub(super) fn structure_branch(
             }
 
             // Find the join point (where both branches converge)
-            let join = find_join_point(func, then_n, else_n, stop);
+            let join = find_join_point(func, then_n, else_n, stop, visited);
 
             // Fix for asymmetric returns: if join is None, check if one
             // branch always returns and the other continues.
-            let (effective_join, then_returns, else_returns) = if join.is_some() {
-                (join, false, false)
+            let (effective_join, then_returns, else_returns, join_from_cfg) = if join.is_some() {
+                (join, false, false, true)
             } else {
                 let tr = branch_always_returns(func, then_n, stop);
                 let er = branch_always_returns(func, else_n, stop);
@@ -118,7 +118,7 @@ pub(super) fn structure_branch(
                 } else {
                     None
                 };
-                (ej, tr, er)
+                (ej, tr, er, false)
             };
 
             // Guard clause shortcut: when one branch always returns and the
@@ -160,14 +160,26 @@ pub(super) fn structure_branch(
             // When a branch targets a shared Return node that was already
             // visited by an earlier branch, structure_region returns empty.
             // Recover the return statement by cloning it from the terminator.
+            // Skip this when the join came from find_join_point (CFG analysis)
+            // and the branch target IS the join point — the return will be
+            // emitted by the main structuring loop after the if/end.
+            // When the join came from branch_always_returns fallback, always
+            // allow cloning because the else branch's return content needs
+            // to be preserved as part of the branch body.
             if then_stmts.is_empty() {
-                if let Some(ret) = clone_return_from_node(func, then_n) {
-                    then_stmts = vec![ret];
+                let skip = join_from_cfg && effective_join == Some(then_n);
+                if !skip {
+                    if let Some(ret) = clone_return_from_node(func, then_n) {
+                        then_stmts = vec![ret];
+                    }
                 }
             }
             if else_stmts.is_empty() {
-                if let Some(ret) = clone_return_from_node(func, else_n) {
-                    else_stmts = vec![ret];
+                let skip = join_from_cfg && effective_join == Some(else_n);
+                if !skip {
+                    if let Some(ret) = clone_return_from_node(func, else_n) {
+                        else_stmts = vec![ret];
+                    }
                 }
             }
 

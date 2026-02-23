@@ -3,7 +3,7 @@ use petgraph::visit::EdgeRef;
 use rustc_hash::FxHashSet;
 
 use lantern_hir::arena::ExprId;
-use lantern_hir::cfg::{CfgGraph, EdgeKind};
+use lantern_hir::cfg::{CfgGraph, EdgeKind, Terminator};
 use lantern_hir::func::HirFunc;
 
 pub(super) fn single_successor(cfg: &CfgGraph, node: NodeIndex) -> Option<NodeIndex> {
@@ -37,6 +37,7 @@ pub(super) fn find_join_point(
     then_node: NodeIndex,
     else_node: NodeIndex,
     outer_stop: Option<NodeIndex>,
+    visited: &FxHashSet<NodeIndex>,
 ) -> Option<NodeIndex> {
     let then_reachable = collect_reachable(&func.cfg, then_node, outer_stop);
     let else_reachable = collect_reachable(&func.cfg, else_node, outer_stop);
@@ -61,6 +62,34 @@ pub(super) fn find_join_point(
     }
     if else_reachable.contains(&then_node) && is_valid_join_candidate(&func.cfg, then_node) {
         common.push(then_node);
+    }
+
+    // Return-sinking: if no valid join candidate was found, check for a
+    // "sunk return" — a bare Return block that one branch flows into via Jump
+    // while the other IS that block. The Luau compiler sinks `return x` into
+    // the continuation point after if-then, creating this pattern:
+    //   Block 0: Branch → then=1, else=2
+    //   Block 1: assign; Jump → 2
+    //   Block 2: Return (bare, no stmts)
+    // Block 2 should be the join point (return after if-end), not an
+    // independent branch target.
+    if common.is_empty() {
+        // Check: else_node is a bare Return reachable from then_node.
+        // Only consider blocks not yet visited by the structurer — visited
+        // blocks may appear "bare" because their stmts were already consumed.
+        if then_reachable.contains(&else_node)
+            && !visited.contains(&else_node)
+            && is_sunk_return(&func.cfg, else_node)
+        {
+            common.push(else_node);
+        }
+        // Check: then_node is a bare Return reachable from else_node
+        if else_reachable.contains(&then_node)
+            && !visited.contains(&then_node)
+            && is_sunk_return(&func.cfg, then_node)
+        {
+            common.push(then_node);
+        }
     }
 
     if common.is_empty() {
@@ -114,6 +143,16 @@ fn is_valid_join_candidate(cfg: &CfgGraph, node: NodeIndex) -> bool {
     }
     // Terminal node: valid join only if it has statements to execute
     !cfg[node].stmts.is_empty()
+}
+
+/// Check if a node is a "sunk return" — a bare Return block with no
+/// statements and no forward successors. This is the pattern created by
+/// the Luau compiler when it sinks `return x` to the end of an if-then block.
+fn is_sunk_return(cfg: &CfgGraph, node: NodeIndex) -> bool {
+    let block = &cfg[node];
+    block.stmts.is_empty()
+        && matches!(block.terminator, Terminator::Return(_))
+        && !has_forward_successors(cfg, node)
 }
 
 pub(super) fn negate_condition(func: &mut HirFunc, condition: ExprId) -> ExprId {
