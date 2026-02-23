@@ -153,6 +153,32 @@ pub fn writes_register(insn: &Instruction, register: u8) -> bool {
     )
 }
 
+/// Check if instructions in `[from, to)` write to any register other than
+/// `expected_reg`. Used to distinguish value ternaries (single result register)
+/// from multi-assignment if/else branches.
+pub fn writes_multiple_registers(
+    instructions: &[Instruction],
+    from: usize,
+    to: usize,
+    expected_reg: u8,
+) -> bool {
+    for pc in from..to {
+        if pc >= instructions.len() {
+            break;
+        }
+        let insn = &instructions[pc];
+        // Skip Nop (AUX words)
+        if insn.op == OpCode::Nop {
+            continue;
+        }
+        // If this instruction writes to A and A != expected_reg, it's multi-reg
+        if writes_register(insn, insn.a) && insn.a != expected_reg {
+            return true;
+        }
+    }
+    false
+}
+
 /// Check if the instructions in `[from, to)` contain a load into `register`
 /// and no control flow or side effects.
 ///

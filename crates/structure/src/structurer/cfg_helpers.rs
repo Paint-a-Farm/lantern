@@ -41,20 +41,25 @@ pub(super) fn find_join_point(
     let then_reachable = collect_reachable(&func.cfg, then_node, outer_stop);
     let else_reachable = collect_reachable(&func.cfg, else_node, outer_stop);
 
-    // A terminal block (e.g. Return with no outgoing edges) is a
-    // destination, not a convergence point.  Treating it as a join causes
-    // the structurer to produce empty if-then-end with the body spilling
-    // after the `end`.  Filter terminals from all join candidates.
+    // A pure terminal block (e.g. bare Return with no statements and no
+    // outgoing edges) is a destination, not a convergence point.  Treating
+    // it as a join causes the structurer to produce empty if-then-end with
+    // the body spilling after the `end`.
+    //
+    // However, a terminal block WITH statements IS a valid join — both
+    // branches converge there and there is code to execute after the merge.
+    // Example: `if p == nil then ... else ... end; <computation>; return`
+    // Here the return block has statements and must be the join point.
     let mut common: Vec<NodeIndex> = then_reachable
         .intersection(&else_reachable)
         .copied()
-        .filter(|n| has_forward_successors(&func.cfg, *n))
+        .filter(|n| is_valid_join_candidate(&func.cfg, *n))
         .collect();
 
-    if then_reachable.contains(&else_node) && has_forward_successors(&func.cfg, else_node) {
+    if then_reachable.contains(&else_node) && is_valid_join_candidate(&func.cfg, else_node) {
         common.push(else_node);
     }
-    if else_reachable.contains(&then_node) && has_forward_successors(&func.cfg, then_node) {
+    if else_reachable.contains(&then_node) && is_valid_join_candidate(&func.cfg, then_node) {
         common.push(then_node);
     }
 
@@ -91,6 +96,24 @@ pub(super) fn collect_reachable(
 fn has_forward_successors(cfg: &CfgGraph, node: NodeIndex) -> bool {
     cfg.edges(node)
         .any(|e| e.weight().kind != EdgeKind::LoopBack)
+}
+
+/// Check if a node is a valid candidate for a join point.
+///
+/// A node with forward successors is always valid (branches converge and
+/// execution continues). A terminal node (no forward successors) is valid
+/// only if it has statements — meaning there is real code to execute at
+/// the merge point before the terminal action (return, etc.).
+///
+/// A bare terminal (no statements, just a Return) is NOT a valid join
+/// because both branches independently terminate there and there is
+/// nothing to place after `end`.
+fn is_valid_join_candidate(cfg: &CfgGraph, node: NodeIndex) -> bool {
+    if has_forward_successors(cfg, node) {
+        return true;
+    }
+    // Terminal node: valid join only if it has statements to execute
+    !cfg[node].stmts.is_empty()
 }
 
 pub(super) fn negate_condition(func: &mut HirFunc, condition: ExprId) -> ExprId {

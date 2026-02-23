@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use rustc_hash::FxHashMap;
 
 /// Opaque variable identifier. Index into VarTable.
@@ -29,6 +31,23 @@ pub struct VarInfo {
     pub def_pcs: Vec<usize>,
     /// Bytecode PCs where this variable is used (read).
     pub use_pcs: Vec<usize>,
+    /// Debug scope PC ranges from bytecode that this variable covers.
+    ///
+    /// For most variables this is a single range. For variables that span
+    /// multiple non-overlapping if-branches, the Luau compiler emits separate
+    /// scope entries that are merged into one VarId — all ranges are stored.
+    ///
+    /// This is the definitive source of truth for scoping: the VM knows exactly
+    /// which register holds which variable at every PC via these ranges.
+    pub scope_pcs: Vec<Range<usize>>,
+    /// The bytecode PC of the def that initializes this variable's scope
+    /// (the `local x = ...` point). This is the def at `scope_start - 1`
+    /// (or `scope_start - 2` for AUX instructions). Only the FIRST scope's
+    /// initializer is stored — later branch defs are reassignments.
+    ///
+    /// When set, the rewrite phase emits this def as `LocalDecl` and all
+    /// other defs as `Assign`.
+    pub decl_pc: Option<usize>,
 }
 
 impl VarInfo {
@@ -39,7 +58,19 @@ impl VarInfo {
             is_loop_var: false,
             def_pcs: Vec::new(),
             use_pcs: Vec::new(),
+            scope_pcs: Vec::new(),
+            decl_pc: None,
         }
+    }
+
+    /// The earliest scope start PC, if any scope ranges are recorded.
+    pub fn earliest_scope_start(&self) -> Option<usize> {
+        self.scope_pcs.iter().map(|r| r.start).min()
+    }
+
+    /// Check if a PC falls within any of this variable's scope ranges.
+    pub fn pc_in_scope(&self, pc: usize) -> bool {
+        self.scope_pcs.iter().any(|r| r.start <= pc && pc < r.end)
     }
 
     /// True if this variable has no debug name — likely a compiler temporary.

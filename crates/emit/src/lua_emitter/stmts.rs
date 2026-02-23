@@ -13,11 +13,9 @@ use super::precedence::binop_str;
 use super::LuaEmitter;
 
 impl<'a> LuaEmitter<'a> {
-    /// Emit a sequence of statements, providing look-ahead context
-    /// for variable hoisting across control flow boundaries.
     pub(super) fn emit_stmts(&mut self, stmts: &[HirStmt]) {
-        for (i, stmt) in stmts.iter().enumerate() {
-            self.emit_stmt_with_following(stmt, &stmts[i + 1..]);
+        for stmt in stmts {
+            self.emit_stmt(stmt);
         }
     }
 
@@ -49,12 +47,9 @@ impl<'a> LuaEmitter<'a> {
     }
 
     pub(super) fn emit_stmt(&mut self, stmt: &HirStmt) {
-        self.emit_stmt_with_following(stmt, &[]);
-    }
-
-    fn emit_stmt_with_following(&mut self, stmt: &HirStmt, following: &[HirStmt]) {
         match stmt {
             HirStmt::LocalDecl { var, init } => {
+                self.declared.insert(*var);
                 self.write_indent();
                 let name = self.var_name(*var);
                 match init {
@@ -99,6 +94,9 @@ impl<'a> LuaEmitter<'a> {
                 }
 
                 self.write_indent();
+                // Assign { Local } means "assign to a local variable".
+                // If we haven't yet emitted a `local` for this var (it wasn't
+                // declared by a LocalDecl node earlier in scope), emit it now.
                 if let LValue::Local(var_id) = target {
                     if self.declared.insert(*var_id) {
                         self.output.push_str("local ");
@@ -112,18 +110,6 @@ impl<'a> LuaEmitter<'a> {
 
             HirStmt::MultiAssign { targets, values } => {
                 self.write_indent();
-                // If all targets are undeclared locals, emit as `local a, b = ...`
-                let all_new_locals = targets.iter().all(|t| {
-                    matches!(t, LValue::Local(v) if !self.declared.contains(v))
-                });
-                if all_new_locals {
-                    self.output.push_str("local ");
-                    for t in targets {
-                        if let LValue::Local(v) = t {
-                            self.declared.insert(*v);
-                        }
-                    }
-                }
                 for (i, t) in targets.iter().enumerate() {
                     if i > 0 {
                         self.output.push_str(", ");
@@ -172,10 +158,6 @@ impl<'a> LuaEmitter<'a> {
                 elseif_clauses,
                 else_body,
             } => {
-                // Hoist local declarations for variables that are first-assigned
-                // inside one branch but used in another branch or after the if.
-                self.hoist_branch_locals(then_body, elseif_clauses, else_body.as_deref(), following);
-
                 self.write_indent();
                 self.output.push_str("if ");
                 self.emit_expr(*condition);
@@ -366,8 +348,7 @@ impl<'a> LuaEmitter<'a> {
             LValue::Global(name) => (name.clone(), ""),
             LValue::Local(var_id) => {
                 let name = self.var_name(*var_id);
-                let is_new = self.declared.insert(*var_id);
-                let prefix = if is_new { "local " } else { "" };
+                let prefix = if self.declared.contains(var_id) { "" } else { "local " };
                 (name, prefix)
             }
             _ => return false,

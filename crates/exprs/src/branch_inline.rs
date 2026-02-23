@@ -17,7 +17,7 @@ use crate::inline::expr_has_side_effects;
 /// global `substitute_vars_batch`, so the same VarId can be inlined
 /// independently in different branches.
 pub fn inline_branch_locals(func: &mut HirFunc) {
-    loop {
+    for _ in 0..100 {
         let count = branch_inline_pass(func);
         if count == 0 {
             break;

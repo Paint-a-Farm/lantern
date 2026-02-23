@@ -23,7 +23,7 @@ use lantern_hir::var::VarId;
 ///
 /// Iterates until no more temporaries can be eliminated.
 pub fn eliminate_temporaries(func: &mut HirFunc) {
-    loop {
+    for _ in 0..100 {
         let inlined = inline_pass(func);
         if inlined == 0 {
             break;

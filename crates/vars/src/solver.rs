@@ -100,22 +100,25 @@ pub fn recover_variables(func: &mut HirFunc, scopes: &ScopeTree, num_params: u8)
             let scope = find_scope(scopes, register, access.reg.pc);
 
             if let Some(scope) = scope {
-                // If a scope covers this PC, the compiler intended this register
-                // to have that name. Bind unconditionally — even if the value is
-                // immediately overwritten. The scope IS the authority.
-                //
-                // Previous code had a liveness check here that created unnamed
-                // temps for "dead" defs (overwritten before any use). This was
-                // wrong: `local _, eventId = call()` repeated 20 times writes
-                // r1 each time, and r1 is always "dead", but the scope says `_`.
+                // Key by (register, name, scope_start) — each scope entry maps to
+                // a separate VarId. The compiler creates one scope entry per `local`
+                // declaration; two entries with the same (register, name) but different
+                // scope_starts are genuinely different variables (e.g. re-declarations
+                // in sequential code like WoodHarvester's two `local x, y, z`).
                 let key = (register, scope.0.to_string(), scope.1);
+                let scope_range = scope.1..scope.2;
                 let var_id = *scope_vars.entry(key).or_insert_with(|| {
                     let mut info = VarInfo::new();
                     info.name = Some(scope.0.to_string());
+                    info.scope_pcs.push(scope_range.clone());
                     func.vars.alloc(info)
                 });
 
+                // Ensure scope range is recorded (may already be there from creation)
                 let info = func.vars.get_mut(var_id);
+                if !info.scope_pcs.iter().any(|r| r.start == scope_range.start && r.end == scope_range.end) {
+                    info.scope_pcs.push(scope_range);
+                }
                 if access.is_def {
                     if !info.def_pcs.contains(&access.reg.pc) {
                         info.def_pcs.push(access.reg.pc);
@@ -149,7 +152,7 @@ pub fn recover_variables(func: &mut HirFunc, scopes: &ScopeTree, num_params: u8)
     //
     // Also handles table constructors (DupTable/NewTable) where the scope
     // opens after field initialization instructions.
-    bind_scope_initializers(func, scopes, &accesses, &by_register, &mut def_var);
+    bind_scope_initializers(func, scopes, &accesses, &by_register, &mut def_var, &use_var);
 
     // Phase 3b: CFG-based pre-scope binding.
     //
@@ -161,7 +164,7 @@ pub fn recover_variables(func: &mut HirFunc, scopes: &ScopeTree, num_params: u8)
     // Use the CFG to find such patterns: for each scope with unbound defs,
     // check if predecessor blocks contain unresolved defs of the same register
     // that flow directly into the scope start.
-    bind_prescope_defs_via_cfg(func, scopes, &accesses, &mut def_var);
+    bind_prescope_defs_via_cfg(func, scopes, &accesses, &mut def_var, &use_var);
 
     // Phase 4: Resolve unscopped uses by finding their reaching def.
     // For each unresolved use of register R at PC p, find the latest
@@ -233,7 +236,7 @@ pub fn recover_variables(func: &mut HirFunc, scopes: &ScopeTree, num_params: u8)
                                 false
                             }
                         }
-                        _ => true, // Fallback: allow if no dominator info
+                        _ => false, // Fail-fast: reject if dominator info unavailable
                     }
                 })
                 .map(|(_, vid)| *vid);
@@ -253,19 +256,28 @@ pub fn recover_variables(func: &mut HirFunc, scopes: &ScopeTree, num_params: u8)
 }
 
 /// Find the scope for a register at a given PC.
-/// Returns (name, scope_start) if found.
-fn find_scope(scopes: &ScopeTree, register: u8, pc: usize) -> Option<(&str, usize)> {
-    // Find the narrowest enclosing scope
-    let mut best: Option<(&str, usize, usize)> = None; // (name, start, width)
+/// Returns (name, scope_start, scope_end) if found.
+fn find_scope(scopes: &ScopeTree, register: u8, pc: usize) -> Option<(&str, usize, usize)> {
+    // Find the widest (outermost) enclosing scope.
+    //
+    // When the Luau compiler inlines a local function, it reuses the caller's
+    // register for the inlined parameter and emits a nested debug scope with
+    // the parameter name. E.g. for `for name in ...` calling `addCommandToResults(name)`:
+    //   r7 'name'        pc=24..61  (outer — for-loop variable)
+    //   r7 'commandName' pc=33..61  (inner — inlined parameter)
+    //
+    // The inner scope is strictly contained in the outer and should NOT override it.
+    // Picking the widest scope gives us the original variable name.
+    let mut best: Option<(&str, usize, usize, usize)> = None; // (name, start, end, width)
     for scope in scopes.scopes_for_register(register) {
         if scope.pc_range.start <= pc && pc < scope.pc_range.end {
             let width = scope.pc_range.end - scope.pc_range.start;
-            if best.map_or(true, |(_, _, w)| width < w) {
-                best = Some((&scope.name, scope.pc_range.start, width));
+            if best.map_or(true, |(_, _, _, w)| width > w) {
+                best = Some((&scope.name, scope.pc_range.start, scope.pc_range.end, width));
             }
         }
     }
-    best.map(|(name, start, _)| (name, start))
+    best.map(|(name, start, end, _)| (name, start, end))
 }
 
 
@@ -287,6 +299,7 @@ fn bind_scope_initializers(
     accesses: &[RegAccess],
     by_register: &FxHashMap<u8, Vec<&RegAccess>>,
     def_var: &mut FxHashMap<RegRef, VarId>,
+    use_var: &FxHashMap<RegRef, VarId>,
 ) {
     // Build a quick lookup: (register, pc) → &RegAccess for defs
     let mut def_at_pc: FxHashMap<(u8, usize), &RegAccess> = FxHashMap::default();
@@ -300,6 +313,7 @@ fn bind_scope_initializers(
     for scope in scopes.all_scopes() {
         let register = scope.register;
         let scope_start = scope.pc_range.start;
+        let scope_end = scope.pc_range.end;
         let scope_name = &scope.name;
 
         // Try the known offsets: scope_start - 1 (normal) and scope_start - 2 (AUX)
@@ -327,12 +341,11 @@ fn bind_scope_initializers(
                 }
 
                 // Create or reuse the variable for this scope
-                let var_id = find_existing_scope_var(func, register, scope_name, scope_start, def_var, accesses)
-                    .unwrap_or_else(|| {
-                        let mut info = VarInfo::new();
-                        info.name = Some(scope_name.to_string());
-                        func.vars.alloc(info)
-                    });
+                let var_id = get_or_create_scope_var(
+                    func, register, scope_name, scope_start, scope_end,
+                    Some(candidate_pc), // This is the declaration point
+                    def_var, use_var, accesses,
+                );
 
                 let info = func.vars.get_mut(var_id);
                 if !info.def_pcs.contains(&access.reg.pc) {
@@ -363,18 +376,14 @@ fn bind_scope_initializers(
             if !already_bound {
                 if let Some(reg_accesses) = by_register.get(&register) {
                     // Try table constructor pattern: find a table def before scope_start.
-                    // Table initialization (DupTable/NewTable + SetTableKS) creates uses
-                    // of the register between def and scope start — these are expected
-                    // and should NOT block matching.
                     'table_search: for access in reg_accesses.iter() {
                         if access.is_def && access.is_table_def && access.reg.pc < scope_start {
                             if !def_var_has_named(def_var, func, &access.reg) {
-                                let var_id = find_existing_scope_var(func, register, scope_name, scope_start, def_var, accesses)
-                                    .unwrap_or_else(|| {
-                                        let mut info = VarInfo::new();
-                                        info.name = Some(scope_name.to_string());
-                                        func.vars.alloc(info)
-                                    });
+                                let var_id = get_or_create_scope_var(
+                                    func, register, scope_name, scope_start, scope_end,
+                                    Some(access.reg.pc), // Table constructor is the declaration
+                                    def_var, use_var, accesses,
+                                );
                                 let info = func.vars.get_mut(var_id);
                                 if !info.def_pcs.contains(&access.reg.pc) {
                                     info.def_pcs.push(access.reg.pc);
@@ -386,19 +395,16 @@ fn bind_scope_initializers(
                     }
 
                     // Try closure pattern: NewClosure/DupClosure at PC N followed
-                    // by CAPTURE instructions, with scope starting after the last
-                    // capture. CAPTURE instructions create uses of registers for
-                    // upvalue captures — these are expected and should not block matching.
-                    if !def_var_has_named_for_scope(def_var, func, register, scope_start, accesses) {
+                    // by CAPTURE instructions, with scope starting after the last capture.
+                    if !scope_entry_already_bound(func, register, scope_name, scope_start, scope_end, def_var, use_var, accesses) {
                         for access in reg_accesses.iter() {
                             if access.is_def && access.is_closure_def && access.reg.pc < scope_start {
                                 if !def_var_has_named(def_var, func, &access.reg) {
-                                    let var_id = find_existing_scope_var(func, register, scope_name, scope_start, def_var, accesses)
-                                        .unwrap_or_else(|| {
-                                            let mut info = VarInfo::new();
-                                            info.name = Some(scope_name.to_string());
-                                            func.vars.alloc(info)
-                                        });
+                                    let var_id = get_or_create_scope_var(
+                                        func, register, scope_name, scope_start, scope_end,
+                                        Some(access.reg.pc), // Closure def is the declaration
+                                        def_var, use_var, accesses,
+                                    );
                                     let info = func.vars.get_mut(var_id);
                                     if !info.def_pcs.contains(&access.reg.pc) {
                                         info.def_pcs.push(access.reg.pc);
@@ -410,60 +416,142 @@ fn bind_scope_initializers(
                         }
                     }
 
-                    // General backward scan: the Luau compiler batches local
-                    // assignments before opening scopes. For N locals, each
-                    // taking K instructions, the first scope opens N*K PCs after
-                    // its def. No fixed window — the "no intervening use" check
-                    // prevents false matches by ensuring the value flows directly
-                    // from def to scope without being read in between.
-                    if !def_var_has_named_for_scope(def_var, func, register, scope_start, accesses) {
-                        // Find the nearest def before scope_start (largest PC < scope_start)
-                        let nearest_def = reg_accesses.iter()
-                            .filter(|a| a.is_def && a.reg.pc < scope_start)
-                            .max_by_key(|a| a.reg.pc);
-                        if let Some(def_access) = nearest_def {
-                            if !def_var_has_named(def_var, func, &def_access.reg) {
-                                let has_intervening_use = reg_accesses.iter().any(|a| {
-                                    !a.is_def
-                                        && a.reg.pc > def_access.reg.pc
-                                        && a.reg.pc < scope_start
-                                });
-                                if !has_intervening_use {
-                                    let var_id = find_existing_scope_var(func, register, scope_name, scope_start, def_var, accesses)
-                                        .unwrap_or_else(|| {
-                                            let mut info = VarInfo::new();
-                                            info.name = Some(scope_name.to_string());
-                                            func.vars.alloc(info)
-                                        });
-                                    let info = func.vars.get_mut(var_id);
-                                    if !info.def_pcs.contains(&def_access.reg.pc) {
-                                        info.def_pcs.push(def_access.reg.pc);
-                                    }
-                                    def_var.insert(def_access.reg, var_id);
-                                }
-                            }
-                        }
-                    }
                 }
             }
         }
     }
+
+    // Batch backward scan: the Luau compiler batches multi-local declarations.
+    //
+    // For `local a, b, c = expr1, expr2, expr3`, it emits:
+    //   PC N:   R_a = expr1
+    //   PC N+1: R_b = expr2
+    //   PC N+2: R_c = expr3
+    //   PC N+3: scopes for R_a, R_b, R_c all open (same scope_start)
+    //
+    // The exact-offset pass (pc-1, pc-2) only catches the last scope in
+    // a batch (R_c at PC N+2 matches scope_start N+3 - 1). The others
+    // need this batch scan.
+    //
+    // Algorithm:
+    // 1. Collect all still-unbound scopes
+    // 2. Group by scope_start
+    // 3. For each group, collect ALL defs (across all registers) before scope_start,
+    //    sorted by PC descending
+    // 4. Match: for each scope in the group (by register), find the latest unbound
+    //    def on that register before scope_start with no intervening use
+    bind_batch_initializers(func, scopes, accesses, by_register, def_var, use_var);
 }
 
-/// Check if a scope already has a named binding from a previous phase.
-fn def_var_has_named_for_scope(
-    def_var: &FxHashMap<RegRef, VarId>,
+/// Batch backward scan for multi-local declarations.
+///
+/// The Luau compiler emits batches like:
+///   PC N:   R_a = expr1
+///   PC N+1: R_b = expr2
+///   PC N+2: R_c = expr3
+///   PC N+3: scopes for R_a, R_b, R_c all open
+///
+/// For each group of unbound scopes sharing the same scope_start, find
+/// the nearest unbound def on each scope's register before scope_start,
+/// checking that no intervening use exists on that register.
+fn bind_batch_initializers(
+    func: &mut HirFunc,
+    scopes: &ScopeTree,
+    accesses: &[RegAccess],
+    by_register: &FxHashMap<u8, Vec<&RegAccess>>,
+    def_var: &mut FxHashMap<RegRef, VarId>,
+    use_var: &FxHashMap<RegRef, VarId>,
+) {
+    // Collect unbound scopes: those without a decl_pc yet
+    let mut unbound: Vec<&lantern_bytecode::scope_tree::LocalScope> = Vec::new();
+    for scope in scopes.all_scopes() {
+        if !scope_entry_already_bound(
+            func, scope.register, &scope.name,
+            scope.pc_range.start, scope.pc_range.end,
+            def_var, use_var, accesses,
+        ) {
+            unbound.push(scope);
+        }
+    }
+
+    // Group unbound scopes by scope_start
+    let mut by_start: FxHashMap<usize, Vec<&lantern_bytecode::scope_tree::LocalScope>> = FxHashMap::default();
+    for scope in &unbound {
+        by_start.entry(scope.pc_range.start).or_default().push(scope);
+    }
+
+    // Process each group
+    for (scope_start, group) in &by_start {
+        let scope_start = *scope_start;
+        if scope_start == 0 {
+            continue;
+        }
+
+        // For each scope in the group, find the nearest unbound def on its register
+        // before scope_start with no intervening use.
+        //
+        // Collect matches as (RegRef, scope_index) to avoid borrow conflicts.
+        let mut matches: Vec<(RegRef, usize)> = Vec::new();
+
+        for (idx, scope) in group.iter().enumerate() {
+            let register = scope.register;
+            if let Some(reg_accesses) = by_register.get(&register) {
+                // Find the nearest def before scope_start that isn't already named
+                let nearest_def = reg_accesses.iter()
+                    .filter(|a| a.is_def && a.reg.pc < scope_start)
+                    .filter(|a| !def_var_has_named(def_var, func, &a.reg))
+                    .max_by_key(|a| a.reg.pc);
+
+                if let Some(def_access) = nearest_def {
+                    // Verify no intervening use between def and scope_start
+                    let has_intervening_use = reg_accesses.iter().any(|a| {
+                        !a.is_def
+                            && a.reg.pc > def_access.reg.pc
+                            && a.reg.pc < scope_start
+                    });
+                    if !has_intervening_use {
+                        matches.push((def_access.reg, idx));
+                    }
+                }
+            }
+        }
+
+        // Apply matches
+        for (def_reg, scope_idx) in matches {
+            let scope = group[scope_idx];
+            let var_id = get_or_create_scope_var(
+                func, scope.register, &scope.name,
+                scope.pc_range.start, scope.pc_range.end,
+                Some(def_reg.pc),
+                def_var, use_var, accesses,
+            );
+            let info = func.vars.get_mut(var_id);
+            if !info.def_pcs.contains(&def_reg.pc) {
+                info.def_pcs.push(def_reg.pc);
+            }
+            def_var.insert(def_reg, var_id);
+        }
+    }
+}
+
+/// Check if a specific scope entry already has a named variable binding.
+///
+/// Unlike a broad "any named def for this register before scope_start",
+/// this checks if the exact scope range (start..end) is already recorded
+/// on a VarId with a decl_pc set. This prevents defs from *other* scope
+/// entries for the same register from blocking the backward scan.
+fn scope_entry_already_bound(
     func: &HirFunc,
     register: u8,
+    scope_name: &str,
     scope_start: usize,
+    scope_end: usize,
+    def_var: &FxHashMap<RegRef, VarId>,
+    use_var: &FxHashMap<RegRef, VarId>,
     accesses: &[RegAccess],
 ) -> bool {
-    accesses.iter().any(|a| {
-        a.is_def && a.reg.register == register && a.reg.pc < scope_start
-            && def_var.get(&a.reg).map_or(false, |&vid| {
-                func.vars.get(vid).name.is_some()
-            })
-    })
+    find_existing_scope_var(func, register, scope_name, scope_start, scope_end, def_var, use_var, accesses)
+        .map_or(false, |vid| func.vars.get(vid).decl_pc.is_some())
 }
 
 /// Bind pre-scope defs to named variables using CFG structure.
@@ -484,6 +572,7 @@ fn bind_prescope_defs_via_cfg(
     scopes: &ScopeTree,
     accesses: &[RegAccess],
     def_var: &mut FxHashMap<RegRef, VarId>,
+    use_var: &FxHashMap<RegRef, VarId>,
 ) {
     // Build a map: block_start_pc → NodeIndex for quick lookup
     let mut pc_to_node: FxHashMap<usize, NodeIndex> = FxHashMap::default();
@@ -532,6 +621,7 @@ fn bind_prescope_defs_via_cfg(
     for scope in scopes.all_scopes() {
         let register = scope.register;
         let scope_start = scope.pc_range.start;
+        let scope_end = scope.pc_range.end;
         let scope_name = &scope.name;
 
         // If this scope has an UNCONDITIONAL initializer in the same block
@@ -555,10 +645,6 @@ fn bind_prescope_defs_via_cfg(
             None => continue,
         };
 
-        // Check if there's already a VarId for this scope
-        // (reuse it if we created one in Phase 3)
-        let existing_var = find_existing_scope_var(func, register, scope_name, scope_start, def_var, accesses);
-
         // Collect predecessor blocks
         let preds: Vec<NodeIndex> = func.cfg
             .neighbors_directed(scope_node, Direction::Incoming)
@@ -566,8 +652,6 @@ fn bind_prescope_defs_via_cfg(
 
         // Only check true predecessor blocks, NOT the scope block itself.
         // Within-block defs are already handled by Phase 3's pc+1/pc+2 lookups.
-        // Including the scope block here would incorrectly bind earlier register
-        // writes (e.g. discarded call results) to named variables.
         for pred_node in preds {
             let pred_block = &func.cfg[pred_node];
             let (pred_start, pred_end) = pred_block.pc_range;
@@ -599,14 +683,15 @@ fn bind_prescope_defs_via_cfg(
                     continue;
                 }
 
-                // Create or reuse the variable for this scope
-                let var_id = existing_var.unwrap_or_else(|| {
-                    let mut info = VarInfo::new();
-                    info.name = Some(scope_name.to_string());
-                    func.vars.alloc(info)
-                });
+                // Pre-scope branch defs are NOT declaration points — the variable
+                // was declared elsewhere (before the if-statement). These are
+                // conditional assignments flowing into a join point.
+                let var_id = get_or_create_scope_var(
+                    func, register, scope_name, scope_start, scope_end,
+                    None, // Not a declaration — branch def
+                    def_var, use_var, accesses,
+                );
 
-                // Merge: if this def was assigned to an unnamed temp, reassign it
                 let info = func.vars.get_mut(var_id);
                 if !info.def_pcs.contains(&access.reg.pc) {
                     info.def_pcs.push(access.reg.pc);
@@ -653,28 +738,92 @@ fn def_var_has_named(
     }
 }
 
+/// Find or create a VarId for a scope, recording the scope range and declaration PC.
+///
+/// This encapsulates the common pattern across Phase 3a and 3b:
+/// - Look for an existing VarId via `find_existing_scope_var`
+/// - If not found, create a new VarInfo with the scope's name
+/// - Record the scope PC range on the VarInfo
+/// - If `decl_pc` is provided and the VarInfo doesn't have one yet, set it
+fn get_or_create_scope_var(
+    func: &mut HirFunc,
+    register: u8,
+    scope_name: &str,
+    scope_start: usize,
+    scope_end: usize,
+    decl_pc: Option<usize>,
+    def_var: &FxHashMap<RegRef, VarId>,
+    use_var: &FxHashMap<RegRef, VarId>,
+    accesses: &[RegAccess],
+) -> VarId {
+    let var_id = find_existing_scope_var(func, register, scope_name, scope_start, scope_end, def_var, use_var, accesses)
+        .unwrap_or_else(|| {
+            let mut info = VarInfo::new();
+            info.name = Some(scope_name.to_string());
+            func.vars.alloc(info)
+        });
+    let info = func.vars.get_mut(var_id);
+    // Record scope range if not already present
+    let range = scope_start..scope_end;
+    if !info.scope_pcs.iter().any(|r| r.start == range.start && r.end == range.end) {
+        info.scope_pcs.push(range);
+    }
+    // Set declaration PC if this is the initializer and none is set yet
+    if let Some(pc) = decl_pc {
+        if info.decl_pc.is_none() {
+            info.decl_pc = Some(pc);
+        }
+    }
+    var_id
+}
+
 /// Find an existing VarId for a scope if one was already created in Phase 3.
+///
+/// Each debug scope entry (register, name, pc_range) corresponds to one `local`
+/// declaration in the source. Non-overlapping scope entries for the same
+/// (register, name) are genuinely different variables (e.g. re-declarations in
+/// sequential code, or branch-local declarations in if/elseif branches).
+///
+/// This function only matches a VarId whose recorded scope_pcs include the
+/// target scope range. This prevents merging genuinely different variables.
 fn find_existing_scope_var(
     func: &HirFunc,
     register: u8,
     scope_name: &str,
     scope_start: usize,
+    scope_end: usize,
     def_var: &FxHashMap<RegRef, VarId>,
+    use_var: &FxHashMap<RegRef, VarId>,
     accesses: &[RegAccess],
 ) -> Option<VarId> {
-    // Look through defs already bound to named variables for this register+scope
+    let target_range = scope_start..scope_end;
+
+    // Look through defs already bound to named variables for this register.
+    // Only match if the VarId's recorded scopes include this exact range.
     for access in accesses {
         if access.is_def && access.reg.register == register {
             if let Some(&var_id) = def_var.get(&access.reg) {
                 let info = func.vars.get(var_id);
-                if info.name.as_deref() == Some(scope_name) {
-                    // Check if this var was created from the same scope
-                    // (it should have def_pcs within or near the scope)
-                    if access.reg.pc >= scope_start
-                        || access.reg.pc + 3 >= scope_start
-                    {
-                        return Some(var_id);
-                    }
+                if info.name.as_deref() == Some(scope_name)
+                    && info.scope_pcs.iter().any(|r| r.start == target_range.start && r.end == target_range.end)
+                {
+                    return Some(var_id);
+                }
+            }
+        }
+    }
+    // Also check use_var — Phase 3 may have bound uses within this scope range
+    // to a VarId that Phase 3a hasn't seen yet.
+    for access in accesses {
+        if !access.is_def && access.reg.register == register
+            && access.reg.pc >= scope_start && access.reg.pc < scope_end
+        {
+            if let Some(&var_id) = use_var.get(&access.reg) {
+                let info = func.vars.get(var_id);
+                if info.name.as_deref() == Some(scope_name)
+                    && info.scope_pcs.iter().any(|r| r.start == target_range.start && r.end == target_range.end)
+                {
+                    return Some(var_id);
                 }
             }
         }
@@ -732,34 +881,49 @@ fn rewrite_func(
         }
     }
 
-    // Rewrite statements block by block (RegAssign targets are defs)
-    for node_idx in func.cfg.node_indices().collect::<Vec<_>>() {
+    // Rewrite statements: RegAssign → LocalDecl or Assign { Local }.
+    //
+    // Only defs matching decl_pc become LocalDecl (zero-ambiguity from
+    // bytecode scope info). Everything else becomes Assign { Local },
+    // and the emitter handles the `local` keyword via its declared set.
+    let nodes: Vec<_> = func.cfg.node_indices().collect();
+    for node_idx in nodes {
         let stmts = std::mem::take(&mut func.cfg[node_idx].stmts);
         let new_stmts: Vec<HirStmt> = stmts
             .into_iter()
-            .map(|stmt| rewrite_stmt(stmt, def_map))
+            .map(|stmt| rewrite_stmt(stmt, def_map, &func.vars))
             .collect();
         func.cfg[node_idx].stmts = new_stmts;
     }
 }
 
-fn rewrite_stmt(stmt: HirStmt, def_map: &FxHashMap<RegRef, VarId>) -> HirStmt {
+fn rewrite_stmt(
+    stmt: HirStmt,
+    def_map: &FxHashMap<RegRef, VarId>,
+    vars: &lantern_hir::var::VarTable,
+) -> HirStmt {
     match stmt {
         HirStmt::RegAssign { target, value } => {
             if let Some(&var_id) = def_map.get(&target) {
-                // Check if this is the first def — if so, make it a LocalDecl
-                // For now, always emit as Assign; LocalDecl detection comes later
-                HirStmt::Assign {
-                    target: LValue::Local(var_id),
-                    value,
+                let info = vars.get(var_id);
+
+                // decl_pc from scope analysis: the compiler tells us exactly
+                // which instruction is the declaration point.
+                if info.decl_pc == Some(target.pc) {
+                    HirStmt::LocalDecl {
+                        var: var_id,
+                        init: Some(value),
+                    }
+                } else {
+                    HirStmt::Assign {
+                        target: LValue::Local(var_id),
+                        value,
+                    }
                 }
             } else {
-                // Unresolved — keep as RegAssign
                 HirStmt::RegAssign { target, value }
             }
         }
-        // All other statements pass through unchanged
-        // (their expressions were already rewritten in the expr pass)
         other => other,
     }
 }

@@ -34,7 +34,7 @@ use lantern_bytecode::instruction::Instruction;
 use lantern_bytecode::opcode::OpCode;
 use rustc_hash::FxHashSet;
 
-use super::utils::{has_aux_word, is_negated_conditional_jump, tail_has_side_effects, tail_loads_register, writes_register};
+use super::utils::{has_aux_word, is_negated_conditional_jump, tail_has_side_effects, tail_loads_register, writes_multiple_registers, writes_register};
 
 /// A conditional value assignment (ternary expression), possibly with compound conditions.
 #[derive(Debug)]
@@ -184,6 +184,16 @@ fn find_value_ternaries(instructions: &[Instruction]) -> Vec<ValueTernary> {
 
         // Verify the false branch also writes to result_reg.
         if !tail_loads_register(instructions, false_val_pc, join_pc, result_reg) {
+            pc += 1;
+            continue;
+        }
+
+        // A true value ternary writes to exactly ONE register per branch.
+        // If either branch writes to multiple distinct registers, this is
+        // a real if/else with multi-assignment, not a conditional expression.
+        if writes_multiple_registers(instructions, true_start, skip_jump_pc, result_reg)
+            || writes_multiple_registers(instructions, false_val_pc, join_pc, result_reg)
+        {
             pc += 1;
             continue;
         }

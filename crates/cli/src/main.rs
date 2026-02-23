@@ -4,6 +4,14 @@ use std::path::{Path, PathBuf};
 use lantern_hir::timing::{self, FileTimings, FuncTimings, PipelineReport, PHASE_EMIT, PHASE_EXPRS, PHASE_LIFT, PHASE_PATTERNS, PHASE_STRUCTURE, PHASE_VARS};
 
 fn main() {
+    // Spawn with a larger stack to handle deeply recursive IR traversals
+    // in debug builds (expression passes recurse per-statement-nesting-level).
+    let builder = std::thread::Builder::new().stack_size(32 * 1024 * 1024);
+    let handler = builder.spawn(real_main).expect("failed to spawn main thread");
+    handler.join().unwrap();
+}
+
+fn real_main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
         eprintln!("usage: lantern [--emit N | --file] <file.l64> [file2.l64 ...]");
