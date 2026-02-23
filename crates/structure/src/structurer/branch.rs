@@ -1,5 +1,6 @@
 use petgraph::stable_graph::NodeIndex;
 use petgraph::visit::EdgeRef;
+use petgraph::Direction;
 use rustc_hash::FxHashSet;
 
 use lantern_hir::arena::ExprId;
@@ -159,6 +160,23 @@ fn try_or_chain(
     // Need at least 2 clauses for an or-chain.
     if clause_data.len() < 2 {
         return None;
+    }
+
+    // Validate: body_node must only be reached by or-chain clause blocks.
+    // If the body_node has predecessors from outside the or-chain (e.g. the
+    // continuation path also reaches it), it's a shared exit — not an
+    // exclusive or-chain body.  Consuming it would remove it from the
+    // continuation path (a correctness bug: missing `return x`).
+    {
+        let clause_blocks: FxHashSet<NodeIndex> = clause_data
+            .iter()
+            .flat_map(|links| links.iter().map(|&(b, _)| b))
+            .collect();
+        for edge in func.cfg.edges_directed(body_node, Direction::Incoming) {
+            if !clause_blocks.contains(&edge.source()) {
+                return None;
+            }
+        }
     }
 
     // If we didn't find the join via chain walking, find it from the body block
@@ -443,14 +461,16 @@ pub(super) fn structure_branch(
             // When a branch targets a shared Return node that was already
             // visited by an earlier branch, structure_region returns empty.
             // Recover the return statement by cloning it from the terminator.
-            // Skip this when the join came from find_join_point (CFG analysis)
-            // and the branch target IS the join point — the return will be
-            // emitted by the main structuring loop after the if/end.
-            // When the join came from branch_always_returns fallback, always
-            // allow cloning because the else branch's return content needs
-            // to be preserved as part of the branch body.
+            //
+            // Skip cloning when:
+            // (a) The join came from find_join_point and the branch target IS the
+            //     join point — the return will be emitted after the if/end.
+            // (b) The branch target equals the outer stop node — the caller's
+            //     loop will handle it (prevents duplicating a shared return
+            //     inside a branch AND after the enclosing if).
             if then_stmts.is_empty() {
-                let skip = join_from_cfg && effective_join == Some(then_n);
+                let skip = (join_from_cfg && effective_join == Some(then_n))
+                    || Some(then_n) == stop;
                 if !skip {
                     if let Some(ret) = clone_return_from_node(func, then_n) {
                         then_stmts = vec![ret];
@@ -458,7 +478,8 @@ pub(super) fn structure_branch(
                 }
             }
             if else_stmts.is_empty() {
-                let skip = join_from_cfg && effective_join == Some(else_n);
+                let skip = (join_from_cfg && effective_join == Some(else_n))
+                    || Some(else_n) == stop;
                 if !skip {
                     if let Some(ret) = clone_return_from_node(func, else_n) {
                         else_stmts = vec![ret];
