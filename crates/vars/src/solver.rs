@@ -340,10 +340,27 @@ fn bind_scope_initializers(
                     }
                 }
 
+                // Only treat as a declaration if the candidate is in the same
+                // basic block as the scope start. When the candidate PC is in
+                // a predecessor block (e.g. a then-branch before a join point),
+                // the def is conditional and should be an assignment, not a
+                // declaration. Phase 3b handles those with None for decl_pc.
+                let scope_block = find_node_containing_pc(func, scope_start);
+                let candidate_block = find_node_containing_pc(func, candidate_pc);
+                let is_same_block = match (scope_block, candidate_block) {
+                    (Some(a), Some(b)) => a == b,
+                    _ => true, // Fallback: treat as same block if we can't determine
+                };
+                let decl_pc = if is_same_block {
+                    Some(candidate_pc)
+                } else {
+                    None // Conditional def — not a declaration point
+                };
+
                 // Create or reuse the variable for this scope
                 let var_id = get_or_create_scope_var(
                     func, register, scope_name, scope_start, scope_end,
-                    Some(candidate_pc), // This is the declaration point
+                    decl_pc,
                     def_var, use_var, accesses,
                 );
 
@@ -519,10 +536,23 @@ fn bind_batch_initializers(
         // Apply matches
         for (def_reg, scope_idx) in matches {
             let scope = group[scope_idx];
+            // Only treat as declaration if the def is in the same block as
+            // the scope start. Conditional branch defs should be assignments.
+            let scope_block = find_node_containing_pc(func, scope.pc_range.start);
+            let def_block = find_node_containing_pc(func, def_reg.pc);
+            let is_same_block = match (scope_block, def_block) {
+                (Some(a), Some(b)) => a == b,
+                _ => true,
+            };
+            let decl_pc = if is_same_block {
+                Some(def_reg.pc)
+            } else {
+                None
+            };
             let var_id = get_or_create_scope_var(
                 func, scope.register, &scope.name,
                 scope.pc_range.start, scope.pc_range.end,
-                Some(def_reg.pc),
+                decl_pc,
                 def_var, use_var, accesses,
             );
             let info = func.vars.get_mut(var_id);
