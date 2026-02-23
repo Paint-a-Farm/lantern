@@ -14,6 +14,7 @@ mod conditions;
 mod elseif;
 mod guards;
 mod returns;
+mod ternary;
 
 use lantern_hir::func::HirFunc;
 use lantern_hir::stmt::{ElseIfClause, HirStmt};
@@ -22,6 +23,7 @@ use compound::merge_compound_conditions;
 use elseif::normalize_inverted_elseif;
 use guards::{flip_elseif_guard, flip_guard_to_wrapper, merge_consecutive_guards};
 use returns::{collapse_multi_return_temps, inline_return_temps};
+use ternary::fold_ternary_patterns;
 
 /// Apply all post-structuring patterns to the function.
 pub fn apply_patterns(func: &mut HirFunc) {
@@ -47,6 +49,8 @@ fn transform_stmts(func: &mut HirFunc, stmts: Vec<HirStmt>) -> Vec<HirStmt> {
         }
         result.push(stmt);
     }
+    // Fold ternary patterns: `x = b; if cond then x = a end` → `x = cond and a or b`
+    result = fold_ternary_patterns(func, result);
     // Merge consecutive early-exit guards (if cond then continue/break end)
     result = merge_consecutive_guards(func, result);
     // Flip single early-exit guards into wrapping if-then blocks
