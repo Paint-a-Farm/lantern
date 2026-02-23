@@ -224,9 +224,9 @@ impl<'a> LuaEmitter<'a> {
             LuaValue::Number(n) => {
                 if n.is_infinite() {
                     if n.is_sign_positive() {
-                        self.output.push_str("math.huge");
+                        self.output.push_str("(1/0)");
                     } else {
-                        self.output.push_str("-math.huge");
+                        self.output.push_str("(-1/0)");
                     }
                 } else if n.is_nan() {
                     self.output.push_str("(0/0)");
@@ -345,9 +345,9 @@ impl<'a> LuaEmitter<'a> {
                 LuaValue::Number(n) => {
                     if n.is_infinite() {
                         Some(if n.is_sign_positive() {
-                            "math.huge".to_string()
+                            "(1/0)".to_string()
                         } else {
-                            "-math.huge".to_string()
+                            "(-1/0)".to_string()
                         })
                     } else if n.is_nan() {
                         Some("(0/0)".to_string())

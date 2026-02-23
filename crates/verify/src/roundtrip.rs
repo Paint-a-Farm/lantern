@@ -45,6 +45,14 @@ pub struct RoundtripArgs {
     /// Structural comparison strictness for bytecode roundtrip.
     #[arg(long, value_enum, default_value_t = CompareModeArg::Loose)]
     pub compare_mode: CompareModeArg,
+
+    /// Print the list of source files that pass roundtrip (one per line).
+    #[arg(long)]
+    pub list_passing: bool,
+
+    /// Print all failures (not just the first 10).
+    #[arg(long)]
+    pub list_failing: bool,
 }
 
 #[derive(Debug)]
@@ -57,6 +65,7 @@ struct GeneratedCase {
 struct CompileRoundtripReport {
     checked: usize,
     failures: Vec<String>,
+    passed: Vec<PathBuf>,
 }
 
 pub fn run(args: RoundtripArgs) -> Result<()> {
@@ -116,12 +125,19 @@ pub fn run(args: RoundtripArgs) -> Result<()> {
 
     if let Some(report) = &compile_report {
         println!(
-            "compile roundtrip: {} checked, {} mismatches",
+            "compile roundtrip: {} checked, {} passed, {} mismatches",
             report.checked,
+            report.passed.len(),
             report.failures.len()
         );
-        for line in report.failures.iter().take(10) {
+        let limit = if args.list_failing { report.failures.len() } else { 10 };
+        for line in report.failures.iter().take(limit) {
             println!("  {}", line);
+        }
+        if args.list_passing {
+            for path in &report.passed {
+                println!("PASS: {}", path.display());
+            }
         }
         if !report.failures.is_empty() {
             hard_failures.push(format!(
@@ -167,7 +183,9 @@ fn run_compile_roundtrip(
     for case in cases {
         report.checked += 1;
         match verify_case_roundtrip(case, source_encode_key, compare_mode) {
-            Ok(()) => {}
+            Ok(()) => {
+                report.passed.push(case.source_path.clone());
+            }
             Err(err) => {
                 report
                     .failures
@@ -236,21 +254,10 @@ fn compile_luau_binary(lua_path: &Path) -> Result<Vec<u8>> {
 }
 
 fn deserialize_compiled_chunk(compiled: &[u8]) -> Result<lantern_bytecode::chunk::Chunk> {
-    let mut keys = vec![0_u8, 1_u8, 203_u8];
-    keys.sort_unstable();
-    keys.dedup();
-
-    let mut last_error = String::new();
-    for key in keys {
-        match lantern_bytecode::deserialize(compiled, key) {
-            Ok(chunk) => return Ok(chunk),
-            Err(err) => {
-                last_error = err;
-            }
-        }
-    }
-
-    bail!("failed to parse recompiled bytecode: {}", last_error)
+    // luau-compile outputs unencoded bytecode. Key 1 is the identity under
+    // wrapping_mul, so it's the correct key for unencoded data.
+    lantern_bytecode::deserialize(compiled, 1)
+        .map_err(|e| anyhow::anyhow!("failed to parse recompiled bytecode: {}", e))
 }
 
 fn decompile_inputs(

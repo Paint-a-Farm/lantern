@@ -4,8 +4,10 @@ use rustc_hash::FxHashSet;
 
 use lantern_hir::arena::ExprId;
 use lantern_hir::cfg::{EdgeKind, Terminator};
+use lantern_hir::expr::HirExpr;
 use lantern_hir::func::HirFunc;
 use lantern_hir::stmt::{ElseIfClause, HirStmt};
+use lantern_hir::types::BinOp;
 
 use super::cfg_helpers::{self, branch_successors, find_join_point, negate_condition};
 use super::guard::{ends_with_exit, is_guard_clause};
@@ -35,6 +37,282 @@ fn resolve_jump_target(func: &HirFunc, start: NodeIndex) -> NodeIndex {
     }
 }
 
+/// Check if a node is a Branch block (has a Branch terminator).
+fn is_branch_block(func: &HirFunc, node: NodeIndex) -> bool {
+    matches!(func.cfg[node].terminator, Terminator::Branch { .. })
+}
+
+/// Attempt to detect and structure an or-chain.
+///
+/// An or-chain is `if (A and B) or (C and D) or E then body end` compiled as a
+/// chain of Branch blocks where each clause's "success" path reaches the same
+/// body block and each clause's "fail" path skips to the next clause.
+///
+/// Returns `Some(next_node)` if an or-chain was detected, `None` otherwise.
+fn try_or_chain(
+    func: &mut HirFunc,
+    node: NodeIndex,
+    _condition: ExprId,
+    _stop: Option<NodeIndex>,
+    loop_ctx: Option<&LoopCtx>,
+    visited: &mut FxHashSet<NodeIndex>,
+    result: &mut Vec<HirStmt>,
+) -> Option<Option<NodeIndex>> {
+    // Find the shared body node by walking the first AND sub-chain.
+    let body_node = find_or_chain_body(func, node)?;
+
+    // Collect all OR clauses. Each clause is a Vec of (block, negate_condition?) pairs
+    // forming an AND chain. The last block in each clause reaches body_node.
+    //
+    // clause_data: Vec of (Vec<(NodeIndex, bool)>, skip_target)
+    //   - Vec<(block, body_on_else)> = AND links
+    //   - skip_target = next OR clause entry (else-edge of first block)
+    let mut clause_data: Vec<Vec<(NodeIndex, bool)>> = Vec::new();
+    let mut current = node;
+    let mut join_node = None;
+
+    'walk: for _ in 0..20 {
+        if !is_branch_block(func, current) {
+            if current != body_node {
+                join_node = Some(current);
+            }
+            break;
+        }
+
+        // Collect AND sub-chain from `current` that reaches body_node.
+        let mut links: Vec<(NodeIndex, bool)> = Vec::new();
+        let mut chain_node = current;
+        let mut skip_target = None;
+
+        for _ in 0..10 {
+            if !is_branch_block(func, chain_node) {
+                break;
+            }
+            let (then_n, else_n) = branch_successors(&func.cfg, chain_node);
+            let (then_n, else_n) = match (then_n, else_n) {
+                (Some(t), Some(e)) => (t, e),
+                _ => break 'walk,
+            };
+
+            // Check if either edge goes directly to body_node.
+            if then_n == body_node {
+                // Body on then-edge. Condition as-is for body execution.
+                links.push((chain_node, false));
+                if skip_target.is_none() {
+                    skip_target = Some(else_n);
+                }
+                // Record this AND chain as a clause.
+                clause_data.push(links);
+                current = skip_target.unwrap();
+                continue 'walk;
+            }
+            if else_n == body_node {
+                // Body on else-edge. Must negate condition.
+                links.push((chain_node, true));
+                if skip_target.is_none() {
+                    skip_target = Some(then_n);
+                }
+                clause_data.push(links);
+                current = skip_target.unwrap();
+                continue 'walk;
+            }
+
+            // Neither edge goes to body directly. Check if one edge
+            // is a Branch (AND chain continuation) and the other is
+            // the skip target (next OR clause).
+            let then_is_branch = is_branch_block(func, then_n);
+            let else_is_branch = is_branch_block(func, else_n);
+
+            if then_is_branch && !else_is_branch {
+                // then = AND continuation, else = skip target
+                links.push((chain_node, false));
+                if skip_target.is_none() {
+                    skip_target = Some(else_n);
+                }
+                chain_node = then_n;
+            } else if !then_is_branch && else_is_branch {
+                // else = AND continuation, then = skip target
+                links.push((chain_node, true));
+                if skip_target.is_none() {
+                    skip_target = Some(then_n);
+                }
+                chain_node = else_n;
+            } else if then_is_branch && else_is_branch {
+                // Both are Branch. The then-edge is the AND continuation
+                // (fallthrough), else is the skip. This is the standard
+                // pattern: `if A then check_B else skip_to_next_OR`.
+                links.push((chain_node, false));
+                if skip_target.is_none() {
+                    skip_target = Some(else_n);
+                }
+                chain_node = then_n;
+            } else {
+                // Neither edge is a Branch or body — dead end.
+                break 'walk;
+            }
+        }
+
+        // Didn't find body_node from this chain — check single block case.
+        break;
+    }
+
+    // Need at least 2 clauses for an or-chain.
+    if clause_data.len() < 2 {
+        return None;
+    }
+
+    // If we didn't find the join via chain walking, find it from the body block
+    // or from the last clause's skip target.
+    if join_node.is_none() {
+        join_node = cfg_helpers::single_successor(&func.cfg, body_node);
+    }
+
+    // Build the combined condition from collected clause data.
+    let mut or_parts: Vec<ExprId> = Vec::new();
+    let mut all_blocks: Vec<NodeIndex> = Vec::new();
+
+    for links in &clause_data {
+        let mut and_parts: Vec<ExprId> = Vec::new();
+        for (i, &(block, body_on_else)) in links.iter().enumerate() {
+            all_blocks.push(block);
+            let Terminator::Branch { condition } = func.cfg[block].terminator else {
+                return None;
+            };
+
+            let is_last = i + 1 == links.len();
+            let cond = if is_last {
+                // Last block: condition depends on which edge reaches body.
+                if body_on_else {
+                    negate_condition(func, condition)
+                } else {
+                    condition
+                }
+            } else {
+                // Non-last block: condition must be true for AND chain
+                // to continue (following then-edge for the standard pattern).
+                // If body_on_else is true for a non-last block, it means
+                // the chain follows the else-edge, so condition must be
+                // false → negate.
+                if body_on_else {
+                    negate_condition(func, condition)
+                } else {
+                    condition
+                }
+            };
+            and_parts.push(cond);
+        }
+
+        let clause_cond = if and_parts.len() == 1 {
+            and_parts[0]
+        } else {
+            let mut combined = and_parts[0];
+            for &part in &and_parts[1..] {
+                combined = func.exprs.alloc(HirExpr::Binary {
+                    op: BinOp::And,
+                    left: combined,
+                    right: part,
+                });
+            }
+            combined
+        };
+        or_parts.push(clause_cond);
+    }
+
+    // Combine all OR clauses.
+    let mut combined = or_parts[0];
+    for &part in &or_parts[1..] {
+        combined = func.exprs.alloc(HirExpr::Binary {
+            op: BinOp::Or,
+            left: combined,
+            right: part,
+        });
+    }
+
+    // Mark all intermediate clause blocks as visited.
+    for &b in &all_blocks {
+        visited.insert(b);
+    }
+
+    // Take statements from the intermediate blocks (value loads referenced
+    // by the conditions). These need to be emitted before the if-statement.
+    for &b in &all_blocks {
+        let block_stmts = std::mem::take(&mut func.cfg[b].stmts);
+        result.extend(block_stmts);
+    }
+
+    // Structure the body.
+    let body_stmts = structure_region(func, body_node, join_node, loop_ctx, visited);
+
+    // Emit the combined if-statement.
+    result.push(HirStmt::If {
+        condition: combined,
+        then_body: body_stmts,
+        elseif_clauses: Vec::new(),
+        else_body: None,
+    });
+
+    Some(join_node)
+}
+
+/// Find the body node for an or-chain starting at `node`.
+///
+/// Walks the first AND sub-chain following then-edges through Branch blocks
+/// until finding a non-Branch successor that has content (the body).
+fn find_or_chain_body(func: &HirFunc, start: NodeIndex) -> Option<NodeIndex> {
+    let mut node = start;
+    for _ in 0..10 {
+        if !is_branch_block(func, node) {
+            return None;
+        }
+        let (then_n, else_n) = branch_successors(&func.cfg, node);
+        let (then_n, else_n) = match (then_n, else_n) {
+            (Some(t), Some(e)) => (t, e),
+            _ => return None,
+        };
+
+        let then_is_branch = is_branch_block(func, then_n);
+        let else_is_branch = is_branch_block(func, else_n);
+
+        if !then_is_branch && !else_is_branch {
+            // Both non-Branch. Pick the one with content (body) vs empty (join).
+            let then_has_content = has_block_content(func, then_n);
+            let else_has_content = has_block_content(func, else_n);
+            if then_has_content && !else_has_content {
+                return Some(then_n);
+            }
+            if else_has_content && !then_has_content {
+                return Some(else_n);
+            }
+            if then_has_content && else_has_content {
+                // Both have content — pick lower PC (body before join).
+                let then_pc = func.cfg[then_n].pc_range.0;
+                let else_pc = func.cfg[else_n].pc_range.0;
+                return Some(if then_pc < else_pc { then_n } else { else_n });
+            }
+            return None;
+        }
+        if !then_is_branch {
+            return Some(then_n);
+        }
+        if !else_is_branch {
+            return Some(else_n);
+        }
+        // Both Branch — follow then-edge (AND chain continuation).
+        node = then_n;
+    }
+    None
+}
+
+/// Check if a block has meaningful content (statements or non-trivial terminator).
+fn has_block_content(func: &HirFunc, node: NodeIndex) -> bool {
+    let block = &func.cfg[node];
+    !block.stmts.is_empty()
+        || !matches!(
+            block.terminator,
+            Terminator::Jump | Terminator::None
+        )
+}
+
 /// Structure a branch (if/else) and return the next node to continue from.
 pub(super) fn structure_branch(
     func: &mut HirFunc,
@@ -45,6 +323,11 @@ pub(super) fn structure_branch(
     visited: &mut FxHashSet<NodeIndex>,
     result: &mut Vec<HirStmt>,
 ) -> Option<NodeIndex> {
+    // Try to detect and structure an or-chain before normal branch processing.
+    if let Some(next) = try_or_chain(func, _node, condition, stop, loop_ctx, visited, result) {
+        return next;
+    }
+
     let (then_node, else_node) = branch_successors(&func.cfg, _node);
 
     match (then_node, else_node) {

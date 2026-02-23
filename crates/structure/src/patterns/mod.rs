@@ -21,7 +21,7 @@ use lantern_hir::stmt::{ElseIfClause, HirStmt};
 
 use compound::merge_compound_conditions;
 use elseif::normalize_inverted_elseif;
-use guards::{flip_elseif_guard, flip_guard_to_wrapper, merge_consecutive_guards};
+use guards::{absorb_tail_into_else, decompose_guard_chain, flip_elseif_guard, flip_guard_to_wrapper, hoist_else_guards, merge_consecutive_guards};
 use returns::{collapse_multi_return_temps, inline_return_temps};
 use ternary::fold_ternary_patterns;
 
@@ -29,25 +29,31 @@ use ternary::fold_ternary_patterns;
 pub fn apply_patterns(func: &mut HirFunc) {
     let entry = func.entry;
     let stmts = std::mem::take(&mut func.cfg[entry].stmts);
-    let stmts = transform_stmts(func, stmts);
+    let stmts = transform_stmts(func, stmts, true);
     func.cfg[entry].stmts = stmts;
 }
 
 /// Recursively transform a statement list, applying all patterns.
-fn transform_stmts(func: &mut HirFunc, stmts: Vec<HirStmt>) -> Vec<HirStmt> {
+///
+/// `is_top_level` is true only for the function's entry block — not for
+/// nested bodies inside loops, ifs, etc.  This gates transforms that are
+/// only valid at the outermost scope (e.g. bare-return guard flipping).
+fn transform_stmts(func: &mut HirFunc, stmts: Vec<HirStmt>, is_top_level: bool) -> Vec<HirStmt> {
     let mut result = Vec::with_capacity(stmts.len());
     for stmt in stmts {
-        let stmt = transform_stmt(func, stmt);
-        // Remove empty if-then-end statements (no body, no elseif, no else).
-        // These are artifacts from the structurer or inliner — the original source
-        // never had empty ifs (the compiler doesn't generate them).
-        if matches!(&stmt, HirStmt::If {
-            then_body, elseif_clauses, else_body, ..
-        } if then_body.is_empty() && elseif_clauses.is_empty() && else_body.is_none())
-        {
-            continue;
+        let transformed = transform_stmt(func, stmt);
+        for stmt in transformed {
+            // Remove empty if-then-end statements (no body, no elseif, no else).
+            // These are artifacts from the structurer or inliner — the original source
+            // never had empty ifs (the compiler doesn't generate them).
+            if matches!(&stmt, HirStmt::If {
+                then_body, elseif_clauses, else_body, ..
+            } if then_body.is_empty() && elseif_clauses.is_empty() && else_body.is_none())
+            {
+                continue;
+            }
+            result.push(stmt);
         }
-        result.push(stmt);
     }
     // Fold ternary patterns: `x = b; if cond then x = a end` → `x = cond and a or b`
     result = fold_ternary_patterns(func, result);
@@ -55,6 +61,12 @@ fn transform_stmts(func: &mut HirFunc, stmts: Vec<HirStmt>) -> Vec<HirStmt> {
     result = merge_consecutive_guards(func, result);
     // Flip single early-exit guards into wrapping if-then blocks
     result = flip_guard_to_wrapper(func, result);
+    // Flip bare-return guards into wrapping if-not blocks — ONLY at top level.
+    // A bare `return` at function-end is identical to falling through, but inside
+    // nested blocks it's a real control flow exit that must be preserved.
+    if is_top_level {
+        result = absorb_tail_into_else(func, result);
+    }
     // Inline `local v = expr; return v` → `return expr`
     result = inline_return_temps(func, result);
     // Collapse `local _v1, _v2 = call(); x = _v1; y = _v2` → `x, y = call()`
@@ -63,7 +75,8 @@ fn transform_stmts(func: &mut HirFunc, stmts: Vec<HirStmt>) -> Vec<HirStmt> {
 }
 
 /// Transform a single statement, recursing into nested bodies.
-fn transform_stmt(func: &mut HirFunc, stmt: HirStmt) -> HirStmt {
+/// Returns a Vec because some patterns decompose one stmt into multiple.
+fn transform_stmt(func: &mut HirFunc, stmt: HirStmt) -> Vec<HirStmt> {
     match stmt {
         HirStmt::If {
             condition,
@@ -71,16 +84,16 @@ fn transform_stmt(func: &mut HirFunc, stmt: HirStmt) -> HirStmt {
             elseif_clauses,
             else_body,
         } => {
-            // First, recurse into all bodies
-            let then_body = transform_stmts(func, then_body);
+            // First, recurse into all bodies (nested = not top level)
+            let then_body = transform_stmts(func, then_body, false);
             let elseif_clauses = elseif_clauses
                 .into_iter()
                 .map(|c| ElseIfClause {
                     condition: c.condition,
-                    body: transform_stmts(func, c.body),
+                    body: transform_stmts(func, c.body, false),
                 })
                 .collect();
-            let else_body = else_body.map(|b| transform_stmts(func, b));
+            let else_body = else_body.map(|b| transform_stmts(func, b, false));
 
             let mut if_stmt = HirStmt::If {
                 condition,
@@ -92,6 +105,20 @@ fn transform_stmt(func: &mut HirFunc, stmt: HirStmt) -> HirStmt {
             // Apply patterns (order matters — normalize first, then merge, then flip guards)
             if_stmt = normalize_inverted_elseif(func, if_stmt);
             if_stmt = merge_compound_conditions(func, if_stmt);
+
+            // Decompose guard chains BEFORE flipping: `if A then return elseif B then
+            // return else <code> end` → separate `if A then return end; if B then
+            // return end; <code>`. This must happen before flip_elseif_guard which
+            // would merge the guard into the else body.
+            if let Some(expanded) = decompose_guard_chain(&if_stmt) {
+                return expanded;
+            }
+
+            // Hoist guard ifs from else body into elseif clauses:
+            // `if A then return else { if B then return end; <tail> } end`
+            // → `if A then return elseif B then return else <tail> end`
+            if_stmt = hoist_else_guards(func, if_stmt);
+
             if_stmt = flip_elseif_guard(func, if_stmt);
 
             // Strip trailing empty elseif clauses (artifact of structuring).
@@ -113,38 +140,38 @@ fn transform_stmt(func: &mut HirFunc, stmt: HirStmt) -> HirStmt {
                 };
             }
 
-            if_stmt
+            vec![if_stmt]
         }
-        HirStmt::While { condition, body } => HirStmt::While {
+        HirStmt::While { condition, body } => vec![HirStmt::While {
             condition,
-            body: transform_stmts(func, body),
-        },
-        HirStmt::Repeat { body, condition } => HirStmt::Repeat {
-            body: transform_stmts(func, body),
+            body: transform_stmts(func, body, false),
+        }],
+        HirStmt::Repeat { body, condition } => vec![HirStmt::Repeat {
+            body: transform_stmts(func, body, false),
             condition,
-        },
+        }],
         HirStmt::NumericFor {
             var,
             start,
             limit,
             step,
             body,
-        } => HirStmt::NumericFor {
+        } => vec![HirStmt::NumericFor {
             var,
             start,
             limit,
             step,
-            body: transform_stmts(func, body),
-        },
+            body: transform_stmts(func, body, false),
+        }],
         HirStmt::GenericFor {
             vars,
             iterators,
             body,
-        } => HirStmt::GenericFor {
+        } => vec![HirStmt::GenericFor {
             vars,
             iterators,
-            body: transform_stmts(func, body),
-        },
-        other => other,
+            body: transform_stmts(func, body, false),
+        }],
+        other => vec![other],
     }
 }

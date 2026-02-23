@@ -29,12 +29,14 @@ end
 function Animation:setUpdateDistance(maxUpdateDistance)
 	if self.owner == nil then
 		return
-	elseif self.owner.currentUpdateDistance ~= nil then
-		if maxUpdateDistance == math.huge then
-			maxUpdateDistance = nil
-		end
-		self.maxUpdateDistance = maxUpdateDistance
 	end
+	if self.owner.currentUpdateDistance == nil then
+		return
+	end
+	if maxUpdateDistance == 1/0 then
+		maxUpdateDistance = nil
+	end
+	self.maxUpdateDistance = maxUpdateDistance
 end
 
 function Animation:getAllowUpdate()

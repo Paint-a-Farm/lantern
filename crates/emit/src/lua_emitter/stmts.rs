@@ -76,6 +76,7 @@ impl<'a> LuaEmitter<'a> {
                     if i > 0 {
                         self.output.push_str(", ");
                     }
+                    self.declared.insert(*var);
                     self.output.push_str(&self.var_name(*var));
                 }
                 if !values.is_empty() {

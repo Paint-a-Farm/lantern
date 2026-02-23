@@ -40,16 +40,29 @@ pub fn collapse_multi_returns(func: &mut HirFunc) {
         groups.sort_by(|a, b| b.start_idx.cmp(&a.start_idx));
 
         for group in &groups {
-            // Build the MultiAssign
             let targets: Vec<LValue> = group.targets.clone();
             let values = vec![group.call_expr];
 
             // Update the call's result_count to match
             update_result_count(&mut func.exprs, group.call_expr, targets.len() as u8);
 
-            let multi = HirStmt::MultiAssign { targets, values };
+            // Use MultiLocalDecl when all targets are local declarations,
+            // MultiAssign otherwise.
+            let all_locals = group.all_local_decls;
+            let multi = if all_locals {
+                let vars = targets
+                    .into_iter()
+                    .map(|t| match t {
+                        LValue::Local(v) => v,
+                        _ => unreachable!(),
+                    })
+                    .collect();
+                HirStmt::MultiLocalDecl { vars, values }
+            } else {
+                HirStmt::MultiAssign { targets, values }
+            };
 
-            // Replace the range [start..start+count) with the single MultiAssign
+            // Replace the range [start..start+count) with the single stmt
             new_stmts.splice(
                 group.start_idx..group.start_idx + group.count,
                 std::iter::once(multi),
@@ -65,6 +78,8 @@ struct MultiReturnGroup {
     count: usize,
     call_expr: ExprId,
     targets: Vec<LValue>,
+    /// True when all source statements are LocalDecl (not Assign).
+    all_local_decls: bool,
 }
 
 fn find_multi_return_groups(stmts: &[HirStmt], func: &HirFunc) -> Vec<MultiReturnGroup> {
@@ -75,7 +90,9 @@ fn find_multi_return_groups(stmts: &[HirStmt], func: &HirFunc) -> Vec<MultiRetur
         // Look for a Call/MethodCall/VarArg assignment
         if let Some((target, call_expr)) = get_call_assign(&stmts[i]) {
             if is_multi_return_source(func, call_expr) {
+                let first_is_local = matches!(&stmts[i], HirStmt::LocalDecl { .. });
                 let mut targets = vec![target];
+                let mut all_local = first_is_local;
                 let mut j = i + 1;
 
                 // Collect consecutive Select assignments referencing this call
@@ -89,6 +106,9 @@ fn find_multi_return_groups(stmts: &[HirStmt], func: &HirFunc) -> Vec<MultiRetur
                                 targets.len(),
                                 "Select index out of order"
                             );
+                            if !matches!(&stmts[j], HirStmt::LocalDecl { .. }) {
+                                all_local = false;
+                            }
                             targets.push(sel_target);
                             j += 1;
                             continue;
@@ -103,6 +123,7 @@ fn find_multi_return_groups(stmts: &[HirStmt], func: &HirFunc) -> Vec<MultiRetur
                         count: targets.len(),
                         call_expr,
                         targets,
+                        all_local_decls: all_local,
                     });
                     i = j;
                     continue;
@@ -115,12 +136,16 @@ fn find_multi_return_groups(stmts: &[HirStmt], func: &HirFunc) -> Vec<MultiRetur
     groups
 }
 
-/// Check if a statement is `Assign { target, value }` where value is a Call/MethodCall/VarArg.
+/// Check if a statement is `Assign { target, value }` or `LocalDecl { var, init }`
+/// where the value is a Call/MethodCall/VarArg.
 fn get_call_assign(stmt: &HirStmt) -> Option<(LValue, ExprId)> {
-    if let HirStmt::Assign { target, value } = stmt {
-        Some((target.clone(), *value))
-    } else {
-        None
+    match stmt {
+        HirStmt::Assign { target, value } => Some((target.clone(), *value)),
+        HirStmt::LocalDecl {
+            var,
+            init: Some(value),
+        } => Some((LValue::Local(*var), *value)),
+        _ => None,
     }
 }
 
@@ -132,13 +157,20 @@ fn is_multi_return_source(func: &HirFunc, expr_id: ExprId) -> bool {
     )
 }
 
-/// Check if a statement is `Assign { target, Select { source, index } }`.
+/// Check if a statement is `Assign { target, Select { source, index } }` or
+/// `LocalDecl { var, init: Select { source, index } }`.
 /// Returns (target, source_expr, index).
 fn get_select_assign(stmt: &HirStmt, func: &HirFunc) -> Option<(LValue, ExprId, u8)> {
-    if let HirStmt::Assign { target, value } = stmt {
-        if let HirExpr::Select { source, index } = func.exprs.get(*value) {
-            return Some((target.clone(), *source, *index));
-        }
+    let (target, value) = match stmt {
+        HirStmt::Assign { target, value } => (target.clone(), *value),
+        HirStmt::LocalDecl {
+            var,
+            init: Some(value),
+        } => (LValue::Local(*var), *value),
+        _ => return None,
+    };
+    if let HirExpr::Select { source, index } = func.exprs.get(value) {
+        return Some((target, *source, *index));
     }
     None
 }

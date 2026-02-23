@@ -15,10 +15,181 @@
 use lantern_hir::arena::ExprId;
 use lantern_hir::expr::HirExpr;
 use lantern_hir::func::HirFunc;
-use lantern_hir::stmt::HirStmt;
-use lantern_hir::types::BinOp;
+use lantern_hir::stmt::{ElseIfClause, HirStmt};
+use lantern_hir::types::{BinOp, LuaValue};
 
-use super::conditions::{negate_condition, negate_or_chain};
+use super::conditions::negate_or_chain;
+
+// ---------------------------------------------------------------------------
+// Guard chain decomposition
+// ---------------------------------------------------------------------------
+
+/// Decompose an if-elseif chain where ALL branches are short guards into
+/// separate guard statements followed by the else body.
+///
+/// ```text
+/// if A then return               -->   if A then return end
+/// elseif B then return                 if B then return end
+/// else <code> end                      <code>
+/// ```
+///
+/// Only applies when then_body AND all elseif clauses are short guards
+/// (≤3 stmts ending with return/break) and the else body has real code.
+/// Returns `Some(stmts)` if decomposed, `None` if not applicable.
+pub(super) fn decompose_guard_chain(stmt: &HirStmt) -> Option<Vec<HirStmt>> {
+    let HirStmt::If {
+        condition,
+        then_body,
+        elseif_clauses,
+        else_body,
+    } = stmt
+    else {
+        return None;
+    };
+
+    // Must have at least one elseif clause (otherwise flip_guard_to_wrapper handles it)
+    if elseif_clauses.is_empty() {
+        return None;
+    }
+
+    // Must have an else body with real code
+    let Some(else_body_stmts) = else_body else {
+        return None;
+    };
+    if ends_with_exit(else_body_stmts) {
+        return None;
+    }
+
+    // then_body must be a short guard
+    if !is_short_guard(then_body) {
+        return None;
+    }
+
+    // ALL elseif clauses must be short guards
+    if !elseif_clauses.iter().all(|c| is_short_guard(&c.body)) {
+        return None;
+    }
+
+    // Decompose: each guard becomes a separate `if cond then <guard> end`
+    let mut result = Vec::with_capacity(elseif_clauses.len() + 1 + else_body_stmts.len());
+
+    // First guard from then_body
+    result.push(HirStmt::If {
+        condition: *condition,
+        then_body: then_body.clone(),
+        elseif_clauses: Vec::new(),
+        else_body: None,
+    });
+
+    // Each elseif becomes a separate guard
+    for clause in elseif_clauses {
+        result.push(HirStmt::If {
+            condition: clause.condition,
+            then_body: clause.body.clone(),
+            elseif_clauses: Vec::new(),
+            else_body: None,
+        });
+    }
+
+    // Append else body stmts directly
+    result.extend(else_body_stmts.iter().cloned());
+
+    Some(result)
+}
+
+// ---------------------------------------------------------------------------
+// Hoist guards from else body into elseif clauses
+// ---------------------------------------------------------------------------
+
+/// When then_body is a short guard and the else_body starts with guard-like
+/// if-statements, promote them to elseif clauses.
+///
+/// ```text
+/// if A then return X                -->   if A then return X
+/// else                                    elseif B then return Y
+///     if B then return Y                  else <tail> end
+///     end
+///     <tail>
+/// end
+/// ```
+///
+/// Only applies when there are no existing elseif clauses, the then_body is a
+/// short guard, and the else_body starts with simple if-then-end guards
+/// (no elseif/else on the inner ifs).
+pub(super) fn hoist_else_guards(_func: &mut HirFunc, stmt: HirStmt) -> HirStmt {
+    let HirStmt::If {
+        condition,
+        then_body,
+        elseif_clauses,
+        else_body,
+    } = stmt
+    else {
+        return stmt;
+    };
+
+    // Requires: no existing elseif clauses, then_body is a short guard, else_body exists
+    if !elseif_clauses.is_empty() || !is_short_guard(&then_body) {
+        return HirStmt::If {
+            condition,
+            then_body,
+            elseif_clauses,
+            else_body,
+        };
+    }
+
+    let Some(else_stmts) = else_body else {
+        return HirStmt::If {
+            condition,
+            then_body,
+            elseif_clauses,
+            else_body: None,
+        };
+    };
+
+    // Collect leading guard ifs from the else body
+    let mut new_elseif = Vec::new();
+    let mut rest_start = 0;
+
+    for (i, stmt) in else_stmts.iter().enumerate() {
+        if let HirStmt::If {
+            condition: inner_cond,
+            then_body: ref inner_then,
+            elseif_clauses: ref inner_elseif,
+            else_body: ref inner_else,
+        } = *stmt
+        {
+            if inner_elseif.is_empty() && inner_else.is_none() && is_short_guard(inner_then) {
+                new_elseif.push(ElseIfClause {
+                    condition: inner_cond,
+                    body: inner_then.clone(),
+                });
+                rest_start = i + 1;
+                continue;
+            }
+        }
+        break;
+    }
+
+    // Need at least one hoisted guard to be worthwhile
+    if new_elseif.is_empty() {
+        return HirStmt::If {
+            condition,
+            then_body,
+            elseif_clauses,
+            else_body: Some(else_stmts),
+        };
+    }
+
+    let tail: Vec<HirStmt> = else_stmts[rest_start..].to_vec();
+    let new_else = if tail.is_empty() { None } else { Some(tail) };
+
+    HirStmt::If {
+        condition,
+        then_body,
+        elseif_clauses: new_elseif,
+        else_body: new_else,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Elseif guard flip
@@ -53,9 +224,14 @@ pub(super) fn flip_elseif_guard(func: &mut HirFunc, stmt: HirStmt) -> HirStmt {
     };
 
     if let Some(last_clause) = elseif_clauses.last_mut() {
-        if is_short_guard(&last_clause.body) && !ends_with_exit(else_body_stmts) {
+        // Flip when:
+        // (a) guard body is short + else body is NOT an exit (normal case), OR
+        // (b) guard body is a trivial return (return / return nil) even if else also exits
+        let can_flip = is_short_guard(&last_clause.body)
+            && (!ends_with_exit(else_body_stmts) || is_trivial_return(func, &last_clause.body));
+        if can_flip {
             let guard_stmts = std::mem::replace(&mut last_clause.body, else_body.unwrap());
-            last_clause.condition = negate_condition(func, last_clause.condition);
+            last_clause.condition = negate_or_chain(func, last_clause.condition);
 
             // Bare `return` — drop it; the function will return implicitly
             if guard_stmts.len() == 1
@@ -68,7 +244,7 @@ pub(super) fn flip_elseif_guard(func: &mut HirFunc, stmt: HirStmt) -> HirStmt {
                     else_body: None,
                 };
             }
-            // Guard has content (e.g. `error(); return`) — keep as else
+            // Guard has content (e.g. `return nil`, `error(); return`) — keep as else
             return HirStmt::If {
                 condition,
                 then_body,
@@ -111,6 +287,37 @@ pub(super) fn is_short_guard(stmts: &[HirStmt]) -> bool {
 /// Check if a statement list ends with an exit (`return` or `break`).
 pub(super) fn ends_with_exit(stmts: &[HirStmt]) -> bool {
     matches!(stmts.last(), Some(HirStmt::Return { .. } | HirStmt::Break))
+}
+
+/// Check if a statement list is a trivial return — just `return` or `return nil`.
+/// These are implicit at the end of a function and can be dropped after guard flipping.
+fn is_trivial_return(func: &HirFunc, stmts: &[HirStmt]) -> bool {
+    if stmts.len() != 1 {
+        return false;
+    }
+    match &stmts[0] {
+        HirStmt::Return(v) if v.is_empty() => true,
+        HirStmt::Return(v) if v.len() == 1 => {
+            matches!(func.exprs.get(v[0]), HirExpr::Literal(LuaValue::Nil))
+        }
+        _ => false,
+    }
+}
+
+/// Check if a statement list is "linear" — no control flow branching.
+/// A linear tail produces only one implicit RETURN path, so wrapping it in
+/// an if-block doesn't change the RETURN count.
+fn is_linear_tail(stmts: &[HirStmt]) -> bool {
+    stmts.iter().all(|s| {
+        !matches!(
+            s,
+            HirStmt::If { .. }
+                | HirStmt::While { .. }
+                | HirStmt::Repeat { .. }
+                | HirStmt::NumericFor { .. }
+                | HirStmt::GenericFor { .. }
+        )
+    })
 }
 
 /// Check if a statement is `if cond then continue end` or `if cond then break end`
@@ -204,38 +411,117 @@ pub(super) fn merge_consecutive_guards(func: &mut HirFunc, stmts: Vec<HirStmt>) 
 // Guard-to-wrapper flip
 // ---------------------------------------------------------------------------
 
-/// Flip a single early-exit `continue` guard at the start of a list into a
-/// wrapping if block.
+/// Flip an early-exit guard into a wrapping if block.
 ///
 /// ```text
-/// if cond then continue end     -->   if not cond then
-/// stmt1                                   stmt1
-/// stmt2                                   stmt2
-///                                     end
+/// <leading stmts>                  <leading stmts>
+/// if cond then continue end  -->   if not cond then
+/// stmt1                                stmt1
+/// stmt2                                stmt2
+///                                  end
 /// ```
 ///
-/// Only applies when the guard is the first statement and there are following
-/// statements to wrap. Only flips `continue` guards — `break` has different
-/// semantics (exits the loop).
+/// Flips `continue` guards and bare `return` guards (no return value).
+/// `break` guards are not flipped — they exit the loop rather than skip one
+/// iteration, so wrapping would change semantics.
+///
+/// The guard does not need to be the first statement — leading non-guard
+/// statements are preserved before the wrapping if block.
 pub(super) fn flip_guard_to_wrapper(func: &mut HirFunc, stmts: Vec<HirStmt>) -> Vec<HirStmt> {
     if stmts.len() < 2 {
         return stmts;
     }
 
-    // Only flip `continue` guards
+    // Only flip `continue` guards — they always reduce to the original pattern.
+    // Bare `return` guards are kept as-is because the original source used the
+    // guard style, and flipping would reduce the RETURN opcode count.
     if let Some((&cond, true)) = is_early_exit_guard(&stmts[0]) {
-        // Apply De Morgan's law when negating an `or` chain:
-        // not (c1 or c2 or c3) → (not c1) and (not c2) and (not c3)
         let inv_cond = negate_or_chain(func, cond);
         let rest: Vec<HirStmt> = stmts[1..].to_vec();
 
-        vec![HirStmt::If {
+        return vec![HirStmt::If {
             condition: inv_cond,
             then_body: rest,
             elseif_clauses: Vec::new(),
             else_body: None,
-        }]
-    } else {
-        stmts
+        }];
     }
+
+    stmts
+}
+
+// ---------------------------------------------------------------------------
+// Tail absorption into else
+// ---------------------------------------------------------------------------
+
+/// When an if-then-end with bare `return` (no values) is followed by a short
+/// tail at the end of a statement list, flip the guard into a wrapping if.
+///
+/// ```text
+/// if cond then return end          if not cond then
+/// shortTail()                -->       shortTail()
+///                                  end
+/// ```
+///
+/// A bare `return` at the end of a function is identical to falling through
+/// (both compile to the same implicit RETURN). Flipping the guard removes
+/// the explicit RETURN, matching the original `if not cond then code end` style
+/// that the compiler generates with just 1 implicit RETURN.
+///
+/// Only applies to bare `return` (no values) — `return X` guards stay as-is
+/// because the explicit return value needs the RETURN instruction.
+pub(super) fn absorb_tail_into_else(func: &mut HirFunc, stmts: Vec<HirStmt>) -> Vec<HirStmt> {
+    if stmts.len() < 2 {
+        return stmts;
+    }
+
+    // Find `if cond then return end` (bare return, no elseif/else) followed by
+    // a short non-exit tail. Walk backwards to find the best candidate.
+    let mut if_idx = None;
+    for i in (0..stmts.len() - 1).rev() {
+        if let HirStmt::If {
+            then_body,
+            elseif_clauses,
+            else_body,
+            ..
+        } = &stmts[i]
+        {
+            if elseif_clauses.is_empty()
+                && else_body.is_none()
+                && then_body.len() == 1
+                && matches!(&then_body[0], HirStmt::Return(v) if v.is_empty())
+            {
+                let tail = &stmts[i + 1..];
+                if !tail.is_empty() && !ends_with_exit(tail) && is_linear_tail(tail) {
+                    if_idx = Some(i);
+                    break;
+                }
+            }
+        }
+    }
+
+    let Some(i) = if_idx else {
+        return stmts;
+    };
+
+    // Extract the condition and negate it
+    let condition = if let HirStmt::If { condition, .. } = &stmts[i] {
+        *condition
+    } else {
+        unreachable!()
+    };
+    let inv_cond = negate_or_chain(func, condition);
+
+    let mut result = stmts;
+    let tail: Vec<HirStmt> = result.split_off(i + 1);
+
+    // Replace the guard with a wrapping if-not-cond
+    *result.last_mut().unwrap() = HirStmt::If {
+        condition: inv_cond,
+        then_body: tail,
+        elseif_clauses: Vec::new(),
+        else_body: None,
+    };
+
+    result
 }

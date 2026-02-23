@@ -39,7 +39,16 @@ pub fn chunks_equivalent(a: &Chunk, b: &Chunk, mode: CompareMode) -> Result<(), 
         let a_hist = opcode_histogram(fa);
         let b_hist = opcode_histogram(fb);
         if a_hist != b_hist {
-            return Err(format!("fn#{idx} opcode histogram mismatch"));
+            let mut diff_lines = Vec::new();
+            for (i, (&ca, &cb)) in a_hist.iter().zip(b_hist.iter()).enumerate() {
+                if ca != cb {
+                    diff_lines.push(format!("  op[{i}]: orig={ca} recompiled={cb}"));
+                }
+            }
+            return Err(format!(
+                "fn#{idx} opcode histogram mismatch:\n{}",
+                diff_lines.join("\n")
+            ));
         }
 
         let a_consts = constant_histogram(fa.constants.as_slice());
