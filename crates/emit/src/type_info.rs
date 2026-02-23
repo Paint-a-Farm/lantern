@@ -79,7 +79,7 @@ fn type_byte_to_string(b: u8) -> String {
         7 => "userdata",
         8 => "vector",
         9 => "buffer",
-        15 => "", // any — no annotation
+        15 => "",              // any — no annotation
         64..=95 => "userdata", // tagged userdata range
         _ => "",
     };

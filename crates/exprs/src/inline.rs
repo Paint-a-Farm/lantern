@@ -90,7 +90,11 @@ fn inline_pass(func: &mut HirFunc) -> usize {
     // leave a conditional body empty (If then/else/elseif, While, etc.)
     if !single_use.is_empty() {
         let sole_body_vars = find_sole_body_candidates(
-            func, &single_use, &dead_stores, &dead_calls, &dead_call_extracts,
+            func,
+            &single_use,
+            &dead_stores,
+            &dead_calls,
+            &dead_call_extracts,
         );
         for var_id in &sole_body_vars {
             single_use.remove(var_id);
@@ -173,18 +177,65 @@ fn find_candidates_in_stmts(
 
         // Recurse into nested bodies
         match stmt {
-            HirStmt::If { then_body, elseif_clauses, else_body, .. } => {
-                find_candidates_in_stmts(then_body, func, use_counts, single_use, dead_stores, dead_calls, dead_call_extracts, def_blocks, current_block);
+            HirStmt::If {
+                then_body,
+                elseif_clauses,
+                else_body,
+                ..
+            } => {
+                find_candidates_in_stmts(
+                    then_body,
+                    func,
+                    use_counts,
+                    single_use,
+                    dead_stores,
+                    dead_calls,
+                    dead_call_extracts,
+                    def_blocks,
+                    current_block,
+                );
                 for clause in elseif_clauses {
-                    find_candidates_in_stmts(&clause.body, func, use_counts, single_use, dead_stores, dead_calls, dead_call_extracts, def_blocks, current_block);
+                    find_candidates_in_stmts(
+                        &clause.body,
+                        func,
+                        use_counts,
+                        single_use,
+                        dead_stores,
+                        dead_calls,
+                        dead_call_extracts,
+                        def_blocks,
+                        current_block,
+                    );
                 }
                 if let Some(body) = else_body {
-                    find_candidates_in_stmts(body, func, use_counts, single_use, dead_stores, dead_calls, dead_call_extracts, def_blocks, current_block);
+                    find_candidates_in_stmts(
+                        body,
+                        func,
+                        use_counts,
+                        single_use,
+                        dead_stores,
+                        dead_calls,
+                        dead_call_extracts,
+                        def_blocks,
+                        current_block,
+                    );
                 }
             }
-            HirStmt::While { body, .. } | HirStmt::Repeat { body, .. }
-            | HirStmt::NumericFor { body, .. } | HirStmt::GenericFor { body, .. } => {
-                find_candidates_in_stmts(body, func, use_counts, single_use, dead_stores, dead_calls, dead_call_extracts, def_blocks, current_block);
+            HirStmt::While { body, .. }
+            | HirStmt::Repeat { body, .. }
+            | HirStmt::NumericFor { body, .. }
+            | HirStmt::GenericFor { body, .. } => {
+                find_candidates_in_stmts(
+                    body,
+                    func,
+                    use_counts,
+                    single_use,
+                    dead_stores,
+                    dead_calls,
+                    dead_call_extracts,
+                    def_blocks,
+                    current_block,
+                );
             }
             _ => {}
         }
@@ -231,32 +282,114 @@ fn apply_removals(
 
         // Recurse into nested bodies
         let stmt = match stmt {
-            HirStmt::If { condition, then_body, elseif_clauses, else_body } => {
-                let then_body = apply_removals(then_body, func, single_use, dead_stores, dead_calls, dead_call_extracts);
-                let elseif_clauses = elseif_clauses.into_iter().map(|c| {
-                    lantern_hir::stmt::ElseIfClause {
+            HirStmt::If {
+                condition,
+                then_body,
+                elseif_clauses,
+                else_body,
+            } => {
+                let then_body = apply_removals(
+                    then_body,
+                    func,
+                    single_use,
+                    dead_stores,
+                    dead_calls,
+                    dead_call_extracts,
+                );
+                let elseif_clauses = elseif_clauses
+                    .into_iter()
+                    .map(|c| lantern_hir::stmt::ElseIfClause {
                         condition: c.condition,
-                        body: apply_removals(c.body, func, single_use, dead_stores, dead_calls, dead_call_extracts),
-                    }
-                }).collect();
-                let else_body = else_body.map(|b| apply_removals(b, func, single_use, dead_stores, dead_calls, dead_call_extracts));
-                HirStmt::If { condition, then_body, elseif_clauses, else_body }
+                        body: apply_removals(
+                            c.body,
+                            func,
+                            single_use,
+                            dead_stores,
+                            dead_calls,
+                            dead_call_extracts,
+                        ),
+                    })
+                    .collect();
+                let else_body = else_body.map(|b| {
+                    apply_removals(
+                        b,
+                        func,
+                        single_use,
+                        dead_stores,
+                        dead_calls,
+                        dead_call_extracts,
+                    )
+                });
+                HirStmt::If {
+                    condition,
+                    then_body,
+                    elseif_clauses,
+                    else_body,
+                }
             }
             HirStmt::While { condition, body } => {
-                let body = apply_removals(body, func, single_use, dead_stores, dead_calls, dead_call_extracts);
+                let body = apply_removals(
+                    body,
+                    func,
+                    single_use,
+                    dead_stores,
+                    dead_calls,
+                    dead_call_extracts,
+                );
                 HirStmt::While { condition, body }
             }
             HirStmt::Repeat { condition, body } => {
-                let body = apply_removals(body, func, single_use, dead_stores, dead_calls, dead_call_extracts);
+                let body = apply_removals(
+                    body,
+                    func,
+                    single_use,
+                    dead_stores,
+                    dead_calls,
+                    dead_call_extracts,
+                );
                 HirStmt::Repeat { condition, body }
             }
-            HirStmt::NumericFor { var, start, limit, step, body } => {
-                let body = apply_removals(body, func, single_use, dead_stores, dead_calls, dead_call_extracts);
-                HirStmt::NumericFor { var, start, limit, step, body }
+            HirStmt::NumericFor {
+                var,
+                start,
+                limit,
+                step,
+                body,
+            } => {
+                let body = apply_removals(
+                    body,
+                    func,
+                    single_use,
+                    dead_stores,
+                    dead_calls,
+                    dead_call_extracts,
+                );
+                HirStmt::NumericFor {
+                    var,
+                    start,
+                    limit,
+                    step,
+                    body,
+                }
             }
-            HirStmt::GenericFor { vars, iterators, body } => {
-                let body = apply_removals(body, func, single_use, dead_stores, dead_calls, dead_call_extracts);
-                HirStmt::GenericFor { vars, iterators, body }
+            HirStmt::GenericFor {
+                vars,
+                iterators,
+                body,
+            } => {
+                let body = apply_removals(
+                    body,
+                    func,
+                    single_use,
+                    dead_stores,
+                    dead_calls,
+                    dead_call_extracts,
+                );
+                HirStmt::GenericFor {
+                    vars,
+                    iterators,
+                    body,
+                }
             }
             other => other,
         };
@@ -322,9 +455,9 @@ fn check_sole_body_stmts(
     // If we're in a conditional body and ALL statements would be fully removed,
     // protect the last single-use candidate to keep the body non-empty.
     if in_conditional_body && !stmts.is_empty() {
-        let all_removable = stmts.iter().all(|s| {
-            is_fully_removed(s, single_use, dead_stores)
-        });
+        let all_removable = stmts
+            .iter()
+            .all(|s| is_fully_removed(s, single_use, dead_stores));
         if all_removable {
             // Find the last single-use candidate and protect it.
             // Dead stores are side-effect-free removals — can't be kept as statements.
@@ -391,7 +524,9 @@ fn build_use_blocks(func: &HirFunc) -> FxHashMap<VarId, FxHashSet<NodeIndex>> {
         match &block.terminator {
             Terminator::Branch { condition } => expr_ids.push(*condition),
             Terminator::Return(values) => expr_ids.extend(values.iter().copied()),
-            Terminator::ForNumPrep { start, limit, step, .. } => {
+            Terminator::ForNumPrep {
+                start, limit, step, ..
+            } => {
                 expr_ids.push(*start);
                 expr_ids.push(*limit);
                 if let Some(s) = step {
@@ -448,7 +583,12 @@ fn collect_stmt_expr_ids(stmts: &[HirStmt], out: &mut Vec<ExprId>) {
             }
             HirStmt::LocalFunctionDef { func_expr, .. } => out.push(*func_expr),
             HirStmt::RegAssign { value, .. } => out.push(*value),
-            HirStmt::If { condition, then_body, elseif_clauses, else_body } => {
+            HirStmt::If {
+                condition,
+                then_body,
+                elseif_clauses,
+                else_body,
+            } => {
                 out.push(*condition);
                 collect_stmt_expr_ids(then_body, out);
                 for clause in elseif_clauses {
@@ -467,7 +607,13 @@ fn collect_stmt_expr_ids(stmts: &[HirStmt], out: &mut Vec<ExprId>) {
                 out.push(*condition);
                 collect_stmt_expr_ids(body, out);
             }
-            HirStmt::NumericFor { start, limit, step, body, .. } => {
+            HirStmt::NumericFor {
+                start,
+                limit,
+                step,
+                body,
+                ..
+            } => {
                 out.push(*start);
                 out.push(*limit);
                 if let Some(s) = step {
@@ -475,7 +621,9 @@ fn collect_stmt_expr_ids(stmts: &[HirStmt], out: &mut Vec<ExprId>) {
                 }
                 collect_stmt_expr_ids(body, out);
             }
-            HirStmt::GenericFor { iterators, body, .. } => {
+            HirStmt::GenericFor {
+                iterators, body, ..
+            } => {
                 out.extend(iterators.iter().copied());
                 collect_stmt_expr_ids(body, out);
             }
@@ -560,7 +708,11 @@ fn collect_var_refs(
                 collect_var_refs(func, *o, block, result, visited);
             }
         }
-        HirExpr::IfExpr { condition, then_expr, else_expr } => {
+        HirExpr::IfExpr {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
             let (c, t, e) = (*condition, *then_expr, *else_expr);
             collect_var_refs(func, c, block, result, visited);
             collect_var_refs(func, t, block, result, visited);
@@ -605,13 +757,14 @@ fn count_uses(func: &HirFunc) -> FxHashMap<VarId, usize> {
     counts
 }
 
-fn count_uses_in_stmt(
-    stmt: &HirStmt,
-    func: &HirFunc,
-    counts: &mut FxHashMap<VarId, usize>,
-) {
+fn count_uses_in_stmt(stmt: &HirStmt, func: &HirFunc, counts: &mut FxHashMap<VarId, usize>) {
     match stmt {
-        HirStmt::If { then_body, elseif_clauses, else_body, .. } => {
+        HirStmt::If {
+            then_body,
+            elseif_clauses,
+            else_body,
+            ..
+        } => {
             for s in then_body {
                 count_uses_in_stmt(s, func, counts);
             }
@@ -651,15 +804,19 @@ pub(crate) fn expr_has_side_effects(func: &HirFunc, expr_id: ExprId) -> bool {
         HirExpr::Concat(operands) => operands.iter().any(|o| expr_has_side_effects(func, *o)),
         HirExpr::Table { array, hash } => {
             array.iter().any(|a| expr_has_side_effects(func, *a))
-                || hash
-                    .iter()
-                    .any(|(k, v)| expr_has_side_effects(func, *k) || expr_has_side_effects(func, *v))
+                || hash.iter().any(|(k, v)| {
+                    expr_has_side_effects(func, *k) || expr_has_side_effects(func, *v)
+                })
         }
         HirExpr::FieldAccess { table, .. } => expr_has_side_effects(func, *table),
         HirExpr::IndexAccess { table, key } => {
             expr_has_side_effects(func, *table) || expr_has_side_effects(func, *key)
         }
-        HirExpr::IfExpr { condition, then_expr, else_expr } => {
+        HirExpr::IfExpr {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
             expr_has_side_effects(func, *condition)
                 || expr_has_side_effects(func, *then_expr)
                 || expr_has_side_effects(func, *else_expr)
@@ -700,18 +857,33 @@ fn lvalue_uses_var_as_table(stmt: &HirStmt, func: &HirFunc, var_id: VarId) -> bo
         HirStmt::Assign { target, .. } | HirStmt::CompoundAssign { target, .. } => {
             lvalue_has_var_table(target, func, var_id)
         }
-        HirStmt::MultiAssign { targets, .. } => {
-            targets.iter().any(|t| lvalue_has_var_table(t, func, var_id))
+        HirStmt::MultiAssign { targets, .. } => targets
+            .iter()
+            .any(|t| lvalue_has_var_table(t, func, var_id)),
+        HirStmt::If {
+            then_body,
+            elseif_clauses,
+            else_body,
+            ..
+        } => {
+            then_body
+                .iter()
+                .any(|s| lvalue_uses_var_as_table(s, func, var_id))
+                || elseif_clauses.iter().any(|c| {
+                    c.body
+                        .iter()
+                        .any(|s| lvalue_uses_var_as_table(s, func, var_id))
+                })
+                || else_body
+                    .as_ref()
+                    .is_some_and(|b| b.iter().any(|s| lvalue_uses_var_as_table(s, func, var_id)))
         }
-        HirStmt::If { then_body, elseif_clauses, else_body, .. } => {
-            then_body.iter().any(|s| lvalue_uses_var_as_table(s, func, var_id))
-                || elseif_clauses.iter().any(|c| c.body.iter().any(|s| lvalue_uses_var_as_table(s, func, var_id)))
-                || else_body.as_ref().is_some_and(|b| b.iter().any(|s| lvalue_uses_var_as_table(s, func, var_id)))
-        }
-        HirStmt::While { body, .. } | HirStmt::Repeat { body, .. }
-        | HirStmt::NumericFor { body, .. } | HirStmt::GenericFor { body, .. } => {
-            body.iter().any(|s| lvalue_uses_var_as_table(s, func, var_id))
-        }
+        HirStmt::While { body, .. }
+        | HirStmt::Repeat { body, .. }
+        | HirStmt::NumericFor { body, .. }
+        | HirStmt::GenericFor { body, .. } => body
+            .iter()
+            .any(|s| lvalue_uses_var_as_table(s, func, var_id)),
         _ => false,
     }
 }
@@ -765,7 +937,11 @@ fn collect_side_effect_calls(func: &HirFunc, expr_id: ExprId, out: &mut Vec<Expr
                 collect_side_effect_calls(func, *op, out);
             }
         }
-        HirExpr::IfExpr { condition, then_expr, else_expr } => {
+        HirExpr::IfExpr {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
             let (c, t, e) = (*condition, *then_expr, *else_expr);
             collect_side_effect_calls(func, c, out);
             collect_side_effect_calls(func, t, out);

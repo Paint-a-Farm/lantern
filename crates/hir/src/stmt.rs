@@ -22,10 +22,7 @@ use crate::var::{RegRef, VarId};
 #[derive(Debug, Clone)]
 pub enum HirStmt {
     /// `local var [= expr]`
-    LocalDecl {
-        var: VarId,
-        init: Option<ExprId>,
-    },
+    LocalDecl { var: VarId, init: Option<ExprId> },
 
     /// `local var1, var2, ... = expr1, expr2, ...`
     MultiLocalDecl {
@@ -34,10 +31,7 @@ pub enum HirStmt {
     },
 
     /// `lvalue = expr`
-    Assign {
-        target: LValue,
-        value: ExprId,
-    },
+    Assign { target: LValue, value: ExprId },
 
     /// `lval1, lval2, ... = expr1, expr2, ...`
     MultiAssign {
@@ -101,30 +95,19 @@ pub enum HirStmt {
     Continue,
 
     /// `function name(params) body end`
-    FunctionDef {
-        name: LValue,
-        func_expr: ExprId,
-    },
+    FunctionDef { name: LValue, func_expr: ExprId },
 
     /// `local function name(params) body end`
-    LocalFunctionDef {
-        var: VarId,
-        func_expr: ExprId,
-    },
+    LocalFunctionDef { var: VarId, func_expr: ExprId },
 
     /// Close upvalues for registers >= target.
     /// (CLOSEUPVALS — internal, usually removed before emit)
-    CloseUpvals {
-        from_register: u8,
-    },
+    CloseUpvals { from_register: u8 },
 
     /// Pre-variable-recovery register assignment.
     /// The vars crate resolves this to Assign/LocalDecl.
     /// Internal only — removed before emit.
-    RegAssign {
-        target: RegRef,
-        value: ExprId,
-    },
+    RegAssign { target: RegRef, value: ExprId },
 }
 
 /// An if-elseif clause.
@@ -147,15 +130,9 @@ pub enum LValue {
     /// Global variable.
     Global(String),
     /// Table field: `expr.name`
-    Field {
-        table: ExprId,
-        field: String,
-    },
+    Field { table: ExprId, field: String },
     /// Table index: `expr[key]`
-    Index {
-        table: ExprId,
-        key: ExprId,
-    },
+    Index { table: ExprId, key: ExprId },
     /// Upvalue.
     Upvalue(u8),
 }

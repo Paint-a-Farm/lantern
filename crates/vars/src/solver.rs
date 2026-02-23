@@ -116,7 +116,11 @@ pub fn recover_variables(func: &mut HirFunc, scopes: &ScopeTree, num_params: u8)
 
                 // Ensure scope range is recorded (may already be there from creation)
                 let info = func.vars.get_mut(var_id);
-                if !info.scope_pcs.iter().any(|r| r.start == scope_range.start && r.end == scope_range.end) {
+                if !info
+                    .scope_pcs
+                    .iter()
+                    .any(|r| r.start == scope_range.start && r.end == scope_range.end)
+                {
                     info.scope_pcs.push(scope_range);
                 }
                 if access.is_def {
@@ -152,7 +156,14 @@ pub fn recover_variables(func: &mut HirFunc, scopes: &ScopeTree, num_params: u8)
     //
     // Also handles table constructors (DupTable/NewTable) where the scope
     // opens after field initialization instructions.
-    bind_scope_initializers(func, scopes, &accesses, &by_register, &mut def_var, &use_var);
+    bind_scope_initializers(
+        func,
+        scopes,
+        &accesses,
+        &by_register,
+        &mut def_var,
+        &use_var,
+    );
 
     // Phase 3b: CFG-based pre-scope binding.
     //
@@ -280,7 +291,6 @@ fn find_scope(scopes: &ScopeTree, register: u8, pc: usize) -> Option<(&str, usiz
     best.map(|(name, start, end, _)| (name, start, end))
 }
 
-
 /// Bind defining instructions to their scopes using compiler invariants.
 ///
 /// The Luau compiler starts a variable's scope on the instruction AFTER the
@@ -334,7 +344,10 @@ fn bind_scope_initializers(
                 }
 
                 // For the pc-2 case, verify the instruction actually has an AUX word
-                if candidate_pc == scope_start.saturating_sub(2) && scope_start >= 2 && candidate_pc != scope_start - 1 {
+                if candidate_pc == scope_start.saturating_sub(2)
+                    && scope_start >= 2
+                    && candidate_pc != scope_start - 1
+                {
                     if !access.has_aux {
                         continue;
                     }
@@ -359,9 +372,15 @@ fn bind_scope_initializers(
 
                 // Create or reuse the variable for this scope
                 let var_id = get_or_create_scope_var(
-                    func, register, scope_name, scope_start, scope_end,
+                    func,
+                    register,
+                    scope_name,
+                    scope_start,
+                    scope_end,
                     decl_pc,
-                    def_var, use_var, accesses,
+                    def_var,
+                    use_var,
+                    accesses,
                 );
 
                 let info = func.vars.get_mut(var_id);
@@ -385,9 +404,9 @@ fn bind_scope_initializers(
             // Check if any candidate was found above
             let already_bound = candidates.iter().any(|&pc| {
                 def_at_pc.get(&(register, pc)).map_or(false, |a| {
-                    def_var.get(&a.reg).map_or(false, |&vid| {
-                        func.vars.get(vid).name.is_some()
-                    })
+                    def_var
+                        .get(&a.reg)
+                        .map_or(false, |&vid| func.vars.get(vid).name.is_some())
                 })
             });
             if !already_bound {
@@ -397,9 +416,15 @@ fn bind_scope_initializers(
                         if access.is_def && access.is_table_def && access.reg.pc < scope_start {
                             if !def_var_has_named(def_var, func, &access.reg) {
                                 let var_id = get_or_create_scope_var(
-                                    func, register, scope_name, scope_start, scope_end,
+                                    func,
+                                    register,
+                                    scope_name,
+                                    scope_start,
+                                    scope_end,
                                     Some(access.reg.pc), // Table constructor is the declaration
-                                    def_var, use_var, accesses,
+                                    def_var,
+                                    use_var,
+                                    accesses,
                                 );
                                 let info = func.vars.get_mut(var_id);
                                 if !info.def_pcs.contains(&access.reg.pc) {
@@ -413,14 +438,30 @@ fn bind_scope_initializers(
 
                     // Try closure pattern: NewClosure/DupClosure at PC N followed
                     // by CAPTURE instructions, with scope starting after the last capture.
-                    if !scope_entry_already_bound(func, register, scope_name, scope_start, scope_end, def_var, use_var, accesses) {
+                    if !scope_entry_already_bound(
+                        func,
+                        register,
+                        scope_name,
+                        scope_start,
+                        scope_end,
+                        def_var,
+                        use_var,
+                        accesses,
+                    ) {
                         for access in reg_accesses.iter() {
-                            if access.is_def && access.is_closure_def && access.reg.pc < scope_start {
+                            if access.is_def && access.is_closure_def && access.reg.pc < scope_start
+                            {
                                 if !def_var_has_named(def_var, func, &access.reg) {
                                     let var_id = get_or_create_scope_var(
-                                        func, register, scope_name, scope_start, scope_end,
+                                        func,
+                                        register,
+                                        scope_name,
+                                        scope_start,
+                                        scope_end,
                                         Some(access.reg.pc), // Closure def is the declaration
-                                        def_var, use_var, accesses,
+                                        def_var,
+                                        use_var,
+                                        accesses,
                                     );
                                     let info = func.vars.get_mut(var_id);
                                     if !info.def_pcs.contains(&access.reg.pc) {
@@ -432,7 +473,6 @@ fn bind_scope_initializers(
                             }
                         }
                     }
-
                 }
             }
         }
@@ -483,18 +523,27 @@ fn bind_batch_initializers(
     let mut unbound: Vec<&lantern_bytecode::scope_tree::LocalScope> = Vec::new();
     for scope in scopes.all_scopes() {
         if !scope_entry_already_bound(
-            func, scope.register, &scope.name,
-            scope.pc_range.start, scope.pc_range.end,
-            def_var, use_var, accesses,
+            func,
+            scope.register,
+            &scope.name,
+            scope.pc_range.start,
+            scope.pc_range.end,
+            def_var,
+            use_var,
+            accesses,
         ) {
             unbound.push(scope);
         }
     }
 
     // Group unbound scopes by scope_start
-    let mut by_start: FxHashMap<usize, Vec<&lantern_bytecode::scope_tree::LocalScope>> = FxHashMap::default();
+    let mut by_start: FxHashMap<usize, Vec<&lantern_bytecode::scope_tree::LocalScope>> =
+        FxHashMap::default();
     for scope in &unbound {
-        by_start.entry(scope.pc_range.start).or_default().push(scope);
+        by_start
+            .entry(scope.pc_range.start)
+            .or_default()
+            .push(scope);
     }
 
     // Process each group
@@ -514,7 +563,8 @@ fn bind_batch_initializers(
             let register = scope.register;
             if let Some(reg_accesses) = by_register.get(&register) {
                 // Find the nearest def before scope_start that isn't already named
-                let nearest_def = reg_accesses.iter()
+                let nearest_def = reg_accesses
+                    .iter()
                     .filter(|a| a.is_def && a.reg.pc < scope_start)
                     .filter(|a| !def_var_has_named(def_var, func, &a.reg))
                     .max_by_key(|a| a.reg.pc);
@@ -522,9 +572,7 @@ fn bind_batch_initializers(
                 if let Some(def_access) = nearest_def {
                     // Verify no intervening use between def and scope_start
                     let has_intervening_use = reg_accesses.iter().any(|a| {
-                        !a.is_def
-                            && a.reg.pc > def_access.reg.pc
-                            && a.reg.pc < scope_start
+                        !a.is_def && a.reg.pc > def_access.reg.pc && a.reg.pc < scope_start
                     });
                     if !has_intervening_use {
                         matches.push((def_access.reg, idx));
@@ -550,10 +598,15 @@ fn bind_batch_initializers(
                 None
             };
             let var_id = get_or_create_scope_var(
-                func, scope.register, &scope.name,
-                scope.pc_range.start, scope.pc_range.end,
+                func,
+                scope.register,
+                &scope.name,
+                scope.pc_range.start,
+                scope.pc_range.end,
                 decl_pc,
-                def_var, use_var, accesses,
+                def_var,
+                use_var,
+                accesses,
             );
             let info = func.vars.get_mut(var_id);
             if !info.def_pcs.contains(&def_reg.pc) {
@@ -580,8 +633,17 @@ fn scope_entry_already_bound(
     use_var: &FxHashMap<RegRef, VarId>,
     accesses: &[RegAccess],
 ) -> bool {
-    find_existing_scope_var(func, register, scope_name, scope_start, scope_end, def_var, use_var, accesses)
-        .map_or(false, |vid| func.vars.get(vid).decl_pc.is_some())
+    find_existing_scope_var(
+        func,
+        register,
+        scope_name,
+        scope_start,
+        scope_end,
+        def_var,
+        use_var,
+        accesses,
+    )
+    .map_or(false, |vid| func.vars.get(vid).decl_pc.is_some())
 }
 
 /// Bind pre-scope defs to named variables using CFG structure.
@@ -634,9 +696,13 @@ fn bind_prescope_defs_via_cfg(
                     // Only count as unconditional if the initializer is in the same block
                     if candidate_pc >= block_start {
                         for access in accesses {
-                            if access.is_def && access.reg.register == register && access.reg.pc == candidate_pc {
+                            if access.is_def
+                                && access.reg.register == register
+                                && access.reg.pc == candidate_pc
+                            {
                                 if def_var_has_named(def_var, func, &access.reg) {
-                                    has_unconditional_initializer.insert((register, scope_start), true);
+                                    has_unconditional_initializer
+                                        .insert((register, scope_start), true);
                                 }
                                 break;
                             }
@@ -676,7 +742,8 @@ fn bind_prescope_defs_via_cfg(
         };
 
         // Collect predecessor blocks
-        let preds: Vec<NodeIndex> = func.cfg
+        let preds: Vec<NodeIndex> = func
+            .cfg
             .neighbors_directed(scope_node, Direction::Incoming)
             .collect();
 
@@ -717,9 +784,15 @@ fn bind_prescope_defs_via_cfg(
                 // was declared elsewhere (before the if-statement). These are
                 // conditional assignments flowing into a join point.
                 let var_id = get_or_create_scope_var(
-                    func, register, scope_name, scope_start, scope_end,
+                    func,
+                    register,
+                    scope_name,
+                    scope_start,
+                    scope_end,
                     None, // Not a declaration — branch def
-                    def_var, use_var, accesses,
+                    def_var,
+                    use_var,
+                    accesses,
                 );
 
                 let info = func.vars.get_mut(var_id);
@@ -756,11 +829,7 @@ fn find_node_containing_pc(func: &HirFunc, pc: usize) -> Option<NodeIndex> {
 }
 
 /// Check if a def is already bound to a NAMED variable (not an unnamed temp).
-fn def_var_has_named(
-    def_var: &FxHashMap<RegRef, VarId>,
-    func: &HirFunc,
-    reg: &RegRef,
-) -> bool {
+fn def_var_has_named(def_var: &FxHashMap<RegRef, VarId>, func: &HirFunc, reg: &RegRef) -> bool {
     if let Some(&var_id) = def_var.get(reg) {
         func.vars.get(var_id).name.is_some()
     } else {
@@ -786,16 +855,29 @@ fn get_or_create_scope_var(
     use_var: &FxHashMap<RegRef, VarId>,
     accesses: &[RegAccess],
 ) -> VarId {
-    let var_id = find_existing_scope_var(func, register, scope_name, scope_start, scope_end, def_var, use_var, accesses)
-        .unwrap_or_else(|| {
-            let mut info = VarInfo::new();
-            info.name = Some(scope_name.to_string());
-            func.vars.alloc(info)
-        });
+    let var_id = find_existing_scope_var(
+        func,
+        register,
+        scope_name,
+        scope_start,
+        scope_end,
+        def_var,
+        use_var,
+        accesses,
+    )
+    .unwrap_or_else(|| {
+        let mut info = VarInfo::new();
+        info.name = Some(scope_name.to_string());
+        func.vars.alloc(info)
+    });
     let info = func.vars.get_mut(var_id);
     // Record scope range if not already present
     let range = scope_start..scope_end;
-    if !info.scope_pcs.iter().any(|r| r.start == range.start && r.end == range.end) {
+    if !info
+        .scope_pcs
+        .iter()
+        .any(|r| r.start == range.start && r.end == range.end)
+    {
         info.scope_pcs.push(range);
     }
     // Set declaration PC if this is the initializer and none is set yet
@@ -835,7 +917,10 @@ fn find_existing_scope_var(
             if let Some(&var_id) = def_var.get(&access.reg) {
                 let info = func.vars.get(var_id);
                 if info.name.as_deref() == Some(scope_name)
-                    && info.scope_pcs.iter().any(|r| r.start == target_range.start && r.end == target_range.end)
+                    && info
+                        .scope_pcs
+                        .iter()
+                        .any(|r| r.start == target_range.start && r.end == target_range.end)
                 {
                     return Some(var_id);
                 }
@@ -845,13 +930,18 @@ fn find_existing_scope_var(
     // Also check use_var — Phase 3 may have bound uses within this scope range
     // to a VarId that Phase 3a hasn't seen yet.
     for access in accesses {
-        if !access.is_def && access.reg.register == register
-            && access.reg.pc >= scope_start && access.reg.pc < scope_end
+        if !access.is_def
+            && access.reg.register == register
+            && access.reg.pc >= scope_start
+            && access.reg.pc < scope_end
         {
             if let Some(&var_id) = use_var.get(&access.reg) {
                 let info = func.vars.get(var_id);
                 if info.name.as_deref() == Some(scope_name)
-                    && info.scope_pcs.iter().any(|r| r.start == target_range.start && r.end == target_range.end)
+                    && info
+                        .scope_pcs
+                        .iter()
+                        .any(|r| r.start == target_range.start && r.end == target_range.end)
                 {
                     return Some(var_id);
                 }
@@ -879,7 +969,10 @@ fn rewrite_func(
                     func.exprs.replace(expr_id, HirExpr::Var(var_id));
                 }
             }
-            HirExpr::Closure { proto_id, ref captures } => {
+            HirExpr::Closure {
+                proto_id,
+                ref captures,
+            } => {
                 let new_captures: Vec<_> = captures
                     .iter()
                     .map(|cap| {

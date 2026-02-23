@@ -53,9 +53,7 @@ pub fn detect_bool_regions(instructions: &[Instruction]) -> FxHashSet<usize> {
             if let Some(target) = conditional_jump_target(insn, pc) {
                 // Jump targets the true LOADB, or past the epilogue (end_pc),
                 // or the false LOADB — all part of the boolean computation.
-                if target == region.true_pc
-                    || target == region.end_pc
-                    || target == region.false_pc
+                if target == region.true_pc || target == region.end_pc || target == region.false_pc
                 {
                     internal_jumps.insert(pc);
                     // Also suppress block boundaries for AUX-word jumps.
@@ -90,7 +88,8 @@ pub fn find_bool_regions(instructions: &[Instruction]) -> Vec<BoolRegion> {
             && next.op == OpCode::LoadB
             && next.a == insn.a   // same register
             && next.b != 0        // true
-            && next.c == 0        // no skip
+            && next.c == 0
+        // no skip
         {
             let result_reg = insn.a;
             let false_pc = pc;
@@ -98,17 +97,14 @@ pub fn find_bool_regions(instructions: &[Instruction]) -> Vec<BoolRegion> {
             let end_pc = pc + 2; // first instruction after the pair
 
             // Trace backwards to find the start of the region.
-            let start_pc =
-                find_region_start(instructions, false_pc, true_pc, end_pc, result_reg);
+            let start_pc = find_region_start(instructions, false_pc, true_pc, end_pc, result_reg);
 
             // Determine OR vs AND by looking at the pre-init LOADB value.
             // OR chain: pre-init is `true` (LOADB Rx, 1)
             // AND chain: pre-init is `false` (LOADB Rx, 0)
             let is_or_chain = if start_pc < false_pc {
                 let start_insn = &instructions[start_pc];
-                if start_insn.op == OpCode::LoadB
-                    && start_insn.a == result_reg
-                    && start_insn.c == 0
+                if start_insn.op == OpCode::LoadB && start_insn.a == result_reg && start_insn.c == 0
                 {
                     Some(start_insn.b != 0)
                 } else {
@@ -154,9 +150,7 @@ fn find_region_start(
                 earliest = scan_pc;
 
                 // Check if there's a LOADB pre-init before this comparison.
-                if let Some(loadb_pc) =
-                    find_preceding_loadb(instructions, scan_pc, result_reg)
-                {
+                if let Some(loadb_pc) = find_preceding_loadb(instructions, scan_pc, result_reg) {
                     earliest = loadb_pc;
                 }
             }
@@ -170,11 +164,7 @@ fn find_region_start(
 /// the pre-initialization of a comparison in the boolean chain.
 ///
 /// Returns the PC of the LOADB if found within a short window.
-fn find_preceding_loadb(
-    instructions: &[Instruction],
-    before_pc: usize,
-    reg: u8,
-) -> Option<usize> {
+fn find_preceding_loadb(instructions: &[Instruction], before_pc: usize, reg: u8) -> Option<usize> {
     // compileConditionValue emits:
     //   LOADB target, 0or1  (the pre-init)
     //   <operand loads: GETIMPORT, MOVE, etc>

@@ -44,17 +44,11 @@ pub enum HirExpr {
 
     /// Table field access with constant string key: `expr.field`
     /// (GETTABLEKS)
-    FieldAccess {
-        table: ExprId,
-        field: String,
-    },
+    FieldAccess { table: ExprId, field: String },
 
     /// Table index with arbitrary expression key: `expr[key]`
     /// (GETTABLE / GETTABLEN)
-    IndexAccess {
-        table: ExprId,
-        key: ExprId,
-    },
+    IndexAccess { table: ExprId, key: ExprId },
 
     /// Binary operation: `left op right`
     /// Includes arithmetic, comparison, concat, and/or.
@@ -65,10 +59,7 @@ pub enum HirExpr {
     },
 
     /// Unary operation: `op expr`
-    Unary {
-        op: UnOp,
-        operand: ExprId,
-    },
+    Unary { op: UnOp, operand: ExprId },
 
     /// Function call: `func(args...)`
     /// result_count: how many results are expected (0 = MULTRET)
@@ -118,10 +109,7 @@ pub enum HirExpr {
 
     /// Select from multi-return: takes the n-th value from a call.
     /// Used when a call returns multiple values and we need one.
-    Select {
-        source: ExprId,
-        index: u8,
-    },
+    Select { source: ExprId, index: u8 },
 }
 
 /// A captured upvalue in a closure.

@@ -1,8 +1,8 @@
+pub mod arena;
+pub mod cfg;
 pub mod expr;
+pub mod func;
 pub mod stmt;
+pub mod timing;
 pub mod types;
 pub mod var;
-pub mod arena;
-pub mod func;
-pub mod cfg;
-pub mod timing;

@@ -9,10 +9,10 @@ use lantern_hir::func::HirFunc;
 use lantern_hir::stmt::{HirStmt, LValue};
 use lantern_hir::var::VarId;
 
-use super::LoopCtx;
-use super::LoopResult;
 use super::cfg_helpers::{branch_successors, negate_condition};
 use super::structure_region;
+use super::LoopCtx;
+use super::LoopResult;
 
 /// Try to structure `node` as a while-loop header.
 ///
@@ -45,17 +45,17 @@ pub(super) fn try_structure_while(
     // loop header. Without this, an if-statement inside a loop body would
     // be misidentified as a nested while loop because its branches reach
     // the outer header and loop back to this node.
-    let (body_start, exit_node, loop_condition) =
-        if has_back_edge_to(&func.cfg, then_n, node, stop) {
-            // Then-branch loops back: body=then, exit=else, condition as-is
-            (then_n, else_n, condition)
-        } else if has_back_edge_to(&func.cfg, else_n, node, stop) {
-            // Else-branch loops back: body=else, exit=then, negate condition
-            let neg_cond = negate_condition(func, condition);
-            (else_n, then_n, neg_cond)
-        } else {
-            return None;
-        };
+    let (body_start, exit_node, loop_condition) = if has_back_edge_to(&func.cfg, then_n, node, stop)
+    {
+        // Then-branch loops back: body=then, exit=else, condition as-is
+        (then_n, else_n, condition)
+    } else if has_back_edge_to(&func.cfg, else_n, node, stop) {
+        // Else-branch loops back: body=else, exit=then, negate condition
+        let neg_cond = negate_condition(func, condition);
+        (else_n, then_n, neg_cond)
+    } else {
+        return None;
+    };
 
     // This is a while loop
     let header_stmts = std::mem::take(&mut func.cfg[node].stmts);
@@ -320,9 +320,7 @@ fn try_inline_for_gen_iterators(
                 .all(|(tv, iv)| *tv == Some(*iv))
         {
             // All targets match — check that the temps are unnamed (compiler-generated)
-            let all_unnamed = iter_vars
-                .iter()
-                .all(|v| func.vars.get(*v).name.is_none());
+            let all_unnamed = iter_vars.iter().all(|v| func.vars.get(*v).name.is_none());
             if all_unnamed {
                 let new_iterators = values.clone();
                 result.pop(); // Remove the MultiAssign

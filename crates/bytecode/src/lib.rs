@@ -1,8 +1,8 @@
-pub mod opcode;
-pub mod instruction;
+pub mod chunk;
 pub mod constant;
 pub mod function;
-pub mod chunk;
+pub mod instruction;
+pub mod opcode;
 pub mod scope_tree;
 
 use nom::number::complete::le_u8;

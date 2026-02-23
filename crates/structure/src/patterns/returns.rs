@@ -43,8 +43,10 @@ pub(super) fn inline_return_temps(func: &HirFunc, mut stmts: Vec<HirStmt>) -> Ve
             let mut values = Vec::with_capacity(n);
 
             for i in 0..n {
-                if let HirStmt::Assign { target: LValue::Local(def_var), value } =
-                    &stmts[start + i]
+                if let HirStmt::Assign {
+                    target: LValue::Local(def_var),
+                    value,
+                } = &stmts[start + i]
                 {
                     if let HirExpr::Var(ret_var) = func.exprs.get(ret_vals[i]) {
                         if ret_var == def_var {
@@ -133,7 +135,11 @@ pub(super) fn collapse_multi_return_temps(func: &HirFunc, mut stmts: Vec<HirStmt
                 let mut all_match = true;
 
                 for j in 0..n {
-                    if let HirStmt::Assign { target: real_target, value } = &stmts[i + 1 + j] {
+                    if let HirStmt::Assign {
+                        target: real_target,
+                        value,
+                    } = &stmts[i + 1 + j]
+                    {
                         if let LValue::Local(temp_var) = &targets[j] {
                             if let HirExpr::Var(used_var) = func.exprs.get(*value) {
                                 if used_var == temp_var {

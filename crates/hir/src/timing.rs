@@ -1,5 +1,5 @@
-use std::time::{Duration, Instant};
 use rustc_hash::FxHashMap;
+use std::time::{Duration, Instant};
 
 /// Phase names used throughout the pipeline.
 pub const PHASE_PARSE: &str = "parse";
@@ -52,7 +52,8 @@ impl FileTimings {
     }
 
     pub fn total_lift(&self) -> Duration {
-        self.functions.iter()
+        self.functions
+            .iter()
             .flat_map(|f| f.phases.iter())
             .filter(|(p, _)| p == PHASE_LIFT)
             .map(|(_, d)| *d)
@@ -111,13 +112,21 @@ impl PipelineReport {
         let file_count = self.files.len();
 
         eprintln!("\n--- Performance Summary ---");
-        eprintln!("{} files, {} functions in {:.2?}", file_count, func_count, grand);
+        eprintln!(
+            "{} files, {} functions in {:.2?}",
+            file_count, func_count, grand
+        );
         eprintln!();
 
         // Print phases in pipeline order
         let phase_order = [
-            PHASE_PARSE, PHASE_LIFT, PHASE_VARS, PHASE_PATTERNS,
-            PHASE_STRUCTURE, PHASE_EXPRS, PHASE_EMIT,
+            PHASE_PARSE,
+            PHASE_LIFT,
+            PHASE_VARS,
+            PHASE_PATTERNS,
+            PHASE_STRUCTURE,
+            PHASE_EXPRS,
+            PHASE_EMIT,
         ];
         for &phase in &phase_order {
             if let Some(&dur) = totals.get(phase) {
@@ -138,8 +147,14 @@ impl PipelineReport {
 
     /// Print the N slowest functions.
     pub fn print_slowest(&self, n: usize) {
-        let mut all_funcs: Vec<(&str, &FuncTimings)> = self.files.iter()
-            .flat_map(|f| f.functions.iter().map(move |func| (f.file_name.as_str(), func)))
+        let mut all_funcs: Vec<(&str, &FuncTimings)> = self
+            .files
+            .iter()
+            .flat_map(|f| {
+                f.functions
+                    .iter()
+                    .map(move |func| (f.file_name.as_str(), func))
+            })
             .collect();
 
         all_funcs.sort_by(|a, b| b.1.total().cmp(&a.1.total()));
@@ -149,7 +164,9 @@ impl PipelineReport {
             let short_file = file.rsplit('/').next().unwrap_or(file);
             eprint!("  {:.2?}  {}::{}", func.total(), short_file, func.func_name);
             // Show phase breakdown
-            let parts: Vec<String> = func.phases.iter()
+            let parts: Vec<String> = func
+                .phases
+                .iter()
                 .map(|(p, d)| format!("{}={:.2?}", p, d))
                 .collect();
             eprintln!("  [{}]", parts.join(", "));

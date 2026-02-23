@@ -7,20 +7,14 @@ pub(super) fn is_guard_clause(stmts: &[HirStmt]) -> bool {
     if stmts.is_empty() || stmts.len() > 3 {
         return false;
     }
-    matches!(
-        stmts.last(),
-        Some(HirStmt::Return { .. } | HirStmt::Break)
-    )
+    matches!(stmts.last(), Some(HirStmt::Return { .. } | HirStmt::Break))
 }
 
 /// Check if a statement list ends with an exit (return or break).
 /// Used to distinguish symmetric if-else (both branches exit) from
 /// guard clauses (one branch exits, the other continues).
 pub(super) fn ends_with_exit(stmts: &[HirStmt]) -> bool {
-    matches!(
-        stmts.last(),
-        Some(HirStmt::Return { .. } | HirStmt::Break)
-    )
+    matches!(stmts.last(), Some(HirStmt::Return { .. } | HirStmt::Break))
 }
 
 /// Recursively strip trailing bare `return` statements that are redundant.

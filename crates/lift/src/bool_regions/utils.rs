@@ -25,9 +25,7 @@ pub fn has_aux_word(op: OpCode) -> bool {
 /// Get the jump target PC of a conditional jump instruction, if it is one.
 pub fn conditional_jump_target(insn: &Instruction, pc: usize) -> Option<usize> {
     match insn.op {
-        OpCode::JumpIf | OpCode::JumpIfNot => {
-            Some(((pc + 1) as i64 + insn.d as i64) as usize)
-        }
+        OpCode::JumpIf | OpCode::JumpIfNot => Some(((pc + 1) as i64 + insn.d as i64) as usize),
         OpCode::JumpIfEq
         | OpCode::JumpIfLe
         | OpCode::JumpIfLt
@@ -37,9 +35,7 @@ pub fn conditional_jump_target(insn: &Instruction, pc: usize) -> Option<usize> {
         | OpCode::JumpXEqKNil
         | OpCode::JumpXEqKB
         | OpCode::JumpXEqKN
-        | OpCode::JumpXEqKS => {
-            Some(((pc + 1) as i64 + insn.d as i64) as usize)
-        }
+        | OpCode::JumpXEqKS => Some(((pc + 1) as i64 + insn.d as i64) as usize),
         _ => None,
     }
 }

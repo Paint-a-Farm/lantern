@@ -25,11 +25,7 @@ pub fn decompile_bytecode(bytecode: &[u8], encode_key: u8) -> String {
 
         let bc_func = &chunk.functions[func_idx];
 
-        lantern_vars::recover_variables(
-            &mut hir,
-            &bc_func.debug.scopes,
-            bc_func.num_params,
-        );
+        lantern_vars::recover_variables(&mut hir, &bc_func.debug.scopes, bc_func.num_params);
 
         // Expression simplification (before structuring).
         lantern_exprs::collapse_multi_returns(&mut hir);

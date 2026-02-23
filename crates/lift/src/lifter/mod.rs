@@ -1,6 +1,6 @@
-mod opcodes;
 mod boolean;
 mod expressions;
+mod opcodes;
 
 use petgraph::stable_graph::NodeIndex;
 use petgraph::Direction;
@@ -118,9 +118,10 @@ impl<'a> Lifter<'a> {
         let (truthy_chains, _truthy_suppressed) =
             crate::bool_regions::detect_truthy_chains(instructions);
         // Filter out chains whose jumps are already suppressed by ternaries
-        self.truthy_chains = truthy_chains.into_iter().filter(|chain| {
-            !chain.jump_pcs.iter().any(|pc| suppressed.contains(pc))
-        }).collect();
+        self.truthy_chains = truthy_chains
+            .into_iter()
+            .filter(|chain| !chain.jump_pcs.iter().any(|pc| suppressed.contains(pc)))
+            .collect();
         for chain in &self.truthy_chains {
             for &jump_pc in &chain.jump_pcs {
                 suppressed.insert(jump_pc);
@@ -131,10 +132,16 @@ impl<'a> Lifter<'a> {
         // Skip ternaries whose jumps are already suppressed
         let (value_ternaries, _value_suppressed) =
             crate::bool_regions::detect_value_ternaries(instructions);
-        self.value_ternaries = value_ternaries.into_iter().filter(|t| {
-            !suppressed.contains(&t.jump_pc) && !suppressed.contains(&t.skip_jump_pc)
-                && t.compound_jump_pcs.iter().all(|&cpc| !suppressed.contains(&cpc))
-        }).collect();
+        self.value_ternaries = value_ternaries
+            .into_iter()
+            .filter(|t| {
+                !suppressed.contains(&t.jump_pc)
+                    && !suppressed.contains(&t.skip_jump_pc)
+                    && t.compound_jump_pcs
+                        .iter()
+                        .all(|&cpc| !suppressed.contains(&cpc))
+            })
+            .collect();
         let mut suppressed_targets = FxHashSet::default();
         for t in &self.value_ternaries {
             suppressed.insert(t.jump_pc);
@@ -159,14 +166,15 @@ impl<'a> Lifter<'a> {
         }
 
         // Discover block boundaries
-        let starts = block_discovery::discover_block_starts(instructions, &suppressed, &suppressed_targets);
+        let starts =
+            block_discovery::discover_block_starts(instructions, &suppressed, &suppressed_targets);
         let ranges = block_discovery::block_ranges(&starts, instructions.len());
 
         // Create all blocks in the CFG
         for &start_pc in &starts {
-            self.block_map.entry(start_pc).or_insert_with(|| {
-                self.hir.cfg.add_node(HirBlock::new())
-            });
+            self.block_map
+                .entry(start_pc)
+                .or_insert_with(|| self.hir.cfg.add_node(HirBlock::new()));
         }
 
         // Lift each block
@@ -212,13 +220,10 @@ impl<'a> Lifter<'a> {
         let block = &self.hir.cfg[self.current_block];
         if matches!(block.terminator, lantern_hir::cfg::Terminator::None) {
             if let Some(&next_node) = self.block_map.get(&end_pc) {
-                self.hir.cfg.add_edge(
-                    self.current_block,
-                    next_node,
-                    HirEdge::unconditional(),
-                );
-                self.hir.cfg[self.current_block].terminator =
-                    lantern_hir::cfg::Terminator::Jump;
+                self.hir
+                    .cfg
+                    .add_edge(self.current_block, next_node, HirEdge::unconditional());
+                self.hir.cfg[self.current_block].terminator = lantern_hir::cfg::Terminator::Jump;
             }
         }
     }
@@ -226,7 +231,15 @@ impl<'a> Lifter<'a> {
     // ---- Helpers ----
 
     pub(super) fn reg_ref(&self, register: u8, pc: usize) -> RegRef {
-        RegRef { register, pc, has_aux: self.func.instructions.get(pc).map_or(false, |i| i.op.has_aux()) }
+        RegRef {
+            register,
+            pc,
+            has_aux: self
+                .func
+                .instructions
+                .get(pc)
+                .map_or(false, |i| i.op.has_aux()),
+        }
     }
 
     pub(super) fn alloc_expr(&mut self, expr: HirExpr, pc: usize) -> ExprId {
@@ -260,17 +273,18 @@ impl<'a> Lifter<'a> {
     }
 
     pub(super) fn emit_assign_reg(&mut self, reg: RegRef, value: ExprId) {
-        self.emit_stmt(HirStmt::RegAssign {
-            target: reg,
-            value,
-        });
+        self.emit_stmt(HirStmt::RegAssign { target: reg, value });
     }
 
     /// Find iterator expressions from a predecessor FORGPREP block.
     /// FORGPREP stores its iterators in the block, then jumps to FORGLOOP.
     /// Assumes exactly one FORGPREP predecessor per FORGLOOP (Luau compiler invariant).
     fn find_forgen_iterators(&self) -> Vec<ExprId> {
-        for pred in self.hir.cfg.neighbors_directed(self.current_block, Direction::Incoming) {
+        for pred in self
+            .hir
+            .cfg
+            .neighbors_directed(self.current_block, Direction::Incoming)
+        {
             if let Some(iters) = &self.hir.cfg[pred].for_gen_iterators {
                 return iters.clone();
             }
@@ -279,7 +293,11 @@ impl<'a> Lifter<'a> {
     }
 
     fn find_forgen_variant(&self) -> lantern_hir::cfg::ForGenVariant {
-        for pred in self.hir.cfg.neighbors_directed(self.current_block, Direction::Incoming) {
+        for pred in self
+            .hir
+            .cfg
+            .neighbors_directed(self.current_block, Direction::Incoming)
+        {
             if let Some(variant) = self.hir.cfg[pred].for_gen_variant {
                 return variant;
             }
@@ -289,11 +307,9 @@ impl<'a> Lifter<'a> {
 
     pub(super) fn add_jump_edge(&mut self, target_pc: usize) {
         if let Some(&target_node) = self.block_map.get(&target_pc) {
-            self.hir.cfg.add_edge(
-                self.current_block,
-                target_node,
-                HirEdge::unconditional(),
-            );
+            self.hir
+                .cfg
+                .add_edge(self.current_block, target_node, HirEdge::unconditional());
         }
     }
 
@@ -302,18 +318,14 @@ impl<'a> Lifter<'a> {
             lantern_hir::cfg::Terminator::Branch { condition };
 
         if let Some(&then_node) = self.block_map.get(&then_pc) {
-            self.hir.cfg.add_edge(
-                self.current_block,
-                then_node,
-                HirEdge::then_edge(),
-            );
+            self.hir
+                .cfg
+                .add_edge(self.current_block, then_node, HirEdge::then_edge());
         }
         if let Some(&else_node) = self.block_map.get(&else_pc) {
-            self.hir.cfg.add_edge(
-                self.current_block,
-                else_node,
-                HirEdge::else_edge(),
-            );
+            self.hir
+                .cfg
+                .add_edge(self.current_block, else_node, HirEdge::else_edge());
         }
     }
 

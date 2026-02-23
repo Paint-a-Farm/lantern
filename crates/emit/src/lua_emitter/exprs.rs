@@ -102,7 +102,12 @@ impl<'a> LuaEmitter<'a> {
                 self.output.push(')');
             }
 
-            HirExpr::MethodCall { object, method, args, .. } => {
+            HirExpr::MethodCall {
+                object,
+                method,
+                args,
+                ..
+            } => {
                 // Literals need explicit parens as method receivers: ("str"):method()
                 let needs_parens = matches!(self.func.exprs.get(*object), HirExpr::Literal(_));
                 if needs_parens {
@@ -131,8 +136,7 @@ impl<'a> LuaEmitter<'a> {
                         if let Some(&bc_idx) = child_protos.get(*proto_id) {
                             if let Some(child_func) = ctx.funcs.get(bc_idx) {
                                 // Anonymous closure: function(...) body end
-                                let mut child_emitter =
-                                    LuaEmitter::new(child_func, self.file_ctx);
+                                let mut child_emitter = LuaEmitter::new(child_func, self.file_ctx);
                                 child_emitter.indent = self.indent;
                                 self.output.push_str("function");
                                 child_emitter.emit_params_only();
@@ -190,7 +194,11 @@ impl<'a> LuaEmitter<'a> {
                 }
             }
 
-            HirExpr::IfExpr { condition, then_expr, else_expr } => {
+            HirExpr::IfExpr {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
                 self.output.push_str("if ");
                 self.emit_expr(*condition);
                 self.output.push_str(" then ");

@@ -34,7 +34,10 @@ use lantern_bytecode::instruction::Instruction;
 use lantern_bytecode::opcode::OpCode;
 use rustc_hash::FxHashSet;
 
-use super::utils::{has_aux_word, is_negated_conditional_jump, tail_has_side_effects, tail_loads_register, writes_multiple_registers, writes_register};
+use super::utils::{
+    has_aux_word, is_negated_conditional_jump, tail_has_side_effects, tail_loads_register,
+    writes_multiple_registers, writes_register,
+};
 
 /// A conditional value assignment (ternary expression), possibly with compound conditions.
 #[derive(Debug)]
@@ -112,7 +115,11 @@ fn find_value_ternaries(instructions: &[Instruction]) -> Vec<ValueTernary> {
         let false_val_pc = ((pc + 1) as i64 + insn.d as i64) as usize;
 
         // Collect additional conditional jumps targeting the same false_val_pc.
-        let scan_start = if has_aux_word(insn.op) { pc + 2 } else { pc + 1 };
+        let scan_start = if has_aux_word(insn.op) {
+            pc + 2
+        } else {
+            pc + 1
+        };
         let mut compound_jump_pcs = Vec::new();
         let mut scan = scan_start;
 
@@ -134,7 +141,12 @@ fn find_value_ternaries(instructions: &[Instruction]) -> Vec<ValueTernary> {
         // The true value starts after the last condition jump.
         let last_cond_pc = compound_jump_pcs.last().copied().unwrap_or(pc);
         let last_cond_insn = &instructions[last_cond_pc];
-        let true_start = last_cond_pc + if has_aux_word(last_cond_insn.op) { 2 } else { 1 };
+        let true_start = last_cond_pc
+            + if has_aux_word(last_cond_insn.op) {
+                2
+            } else {
+                1
+            };
 
         // The Jump must be at false_val_pc - 1 (immediately before the false value).
         if false_val_pc < 2 || false_val_pc > instructions.len() {
@@ -170,9 +182,7 @@ fn find_value_ternaries(instructions: &[Instruction]) -> Vec<ValueTernary> {
         // Both branches must load into the same result register.
         // Skip past Nop/AUX words to find the actual value-producing instruction.
         let mut true_last_pc = skip_jump_pc - 1;
-        while true_last_pc > true_start
-            && instructions[true_last_pc].op == OpCode::Nop
-        {
+        while true_last_pc > true_start && instructions[true_last_pc].op == OpCode::Nop {
             true_last_pc -= 1;
         }
         let true_last_insn = &instructions[true_last_pc];

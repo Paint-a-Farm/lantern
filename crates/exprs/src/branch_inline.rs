@@ -59,8 +59,7 @@ fn process_stmt_list(
                 else_body,
                 ..
             } => {
-                let (new_then, c1) =
-                    process_stmt_list(func, std::mem::take(then_body), true);
+                let (new_then, c1) = process_stmt_list(func, std::mem::take(then_body), true);
                 *then_body = new_then;
                 total += c1;
                 for clause in elseif_clauses.iter_mut() {
@@ -70,8 +69,7 @@ fn process_stmt_list(
                     total += c;
                 }
                 if let Some(body) = else_body {
-                    let (new_body, c) =
-                        process_stmt_list(func, std::mem::take(body), true);
+                    let (new_body, c) = process_stmt_list(func, std::mem::take(body), true);
                     *body = new_body;
                     total += c;
                 }
@@ -80,8 +78,7 @@ fn process_stmt_list(
             | HirStmt::Repeat { body, .. }
             | HirStmt::NumericFor { body, .. }
             | HirStmt::GenericFor { body, .. } => {
-                let (new_body, c) =
-                    process_stmt_list(func, std::mem::take(body), true);
+                let (new_body, c) = process_stmt_list(func, std::mem::take(body), true);
                 *body = new_body;
                 total += c;
             }
@@ -161,8 +158,7 @@ fn process_stmt_list(
 
             if let Some((j, use_expr_id)) = found_use {
                 // Verify no more uses after j in this list
-                let remaining_uses =
-                    count_var_uses_in_stmts(&stmts[j + 1..], var_id, &func.exprs);
+                let remaining_uses = count_var_uses_in_stmts(&stmts[j + 1..], var_id, &func.exprs);
                 if remaining_uses == 0 {
                     // Inline: replace the specific use ExprId with the RHS
                     let replacement = func.exprs.get(rhs_expr).clone();
@@ -280,7 +276,10 @@ fn find_var_uses_in_stmt(
 ) -> Vec<ExprId> {
     let mut out = Vec::new();
     match stmt {
-        HirStmt::Assign { target: lval, value } => {
+        HirStmt::Assign {
+            target: lval,
+            value,
+        } => {
             // Count uses in the RHS expression
             find_var_uses_in_expr(exprs, *value, target, &mut out);
             // Count uses in LValue table/key (reads)
@@ -381,11 +380,13 @@ fn find_var_uses_in_stmt(
                 out.extend(find_var_uses_in_stmt(s, target, exprs));
             }
         }
-        HirStmt::FunctionDef { func_expr, .. }
-        | HirStmt::LocalFunctionDef { func_expr, .. } => {
+        HirStmt::FunctionDef { func_expr, .. } | HirStmt::LocalFunctionDef { func_expr, .. } => {
             find_var_uses_in_expr(exprs, *func_expr, target, &mut out);
         }
-        HirStmt::Break | HirStmt::Continue | HirStmt::CloseUpvals { .. } | HirStmt::RegAssign { .. } => {}
+        HirStmt::Break
+        | HirStmt::Continue
+        | HirStmt::CloseUpvals { .. }
+        | HirStmt::RegAssign { .. } => {}
     }
     out
 }
@@ -429,9 +430,9 @@ fn stmt_defines_var(stmt: &HirStmt, var_id: VarId) -> bool {
             target: LValue::Local(v),
             ..
         } => *v == var_id,
-        HirStmt::MultiAssign { targets, .. } => {
-            targets.iter().any(|t| matches!(t, LValue::Local(v) if *v == var_id))
-        }
+        HirStmt::MultiAssign { targets, .. } => targets
+            .iter()
+            .any(|t| matches!(t, LValue::Local(v) if *v == var_id)),
         HirStmt::LocalDecl { var, .. } => *var == var_id,
         HirStmt::MultiLocalDecl { vars, .. } => vars.contains(&var_id),
         _ => false,
@@ -445,9 +446,7 @@ fn stmt_has_side_effects(stmt: &HirStmt, func: &HirFunc) -> bool {
         HirStmt::MultiAssign { values, .. } => {
             values.iter().any(|v| expr_has_side_effects(func, *v))
         }
-        HirStmt::LocalDecl { init, .. } => {
-            init.map_or(false, |e| expr_has_side_effects(func, e))
-        }
+        HirStmt::LocalDecl { init, .. } => init.map_or(false, |e| expr_has_side_effects(func, e)),
         HirStmt::MultiLocalDecl { values, .. } => {
             values.iter().any(|v| expr_has_side_effects(func, *v))
         }

@@ -1,13 +1,18 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use lantern_hir::timing::{self, FileTimings, FuncTimings, PipelineReport, PHASE_EMIT, PHASE_EXPRS, PHASE_LIFT, PHASE_PATTERNS, PHASE_STRUCTURE, PHASE_VARS};
+use lantern_hir::timing::{
+    self, FileTimings, FuncTimings, PipelineReport, PHASE_EMIT, PHASE_EXPRS, PHASE_LIFT,
+    PHASE_PATTERNS, PHASE_STRUCTURE, PHASE_VARS,
+};
 
 fn main() {
     // Spawn with a larger stack to handle deeply recursive IR traversals
     // in debug builds (expression passes recurse per-statement-nesting-level).
     let builder = std::thread::Builder::new().stack_size(32 * 1024 * 1024);
-    let handler = builder.spawn(real_main).expect("failed to spawn main thread");
+    let handler = builder
+        .spawn(real_main)
+        .expect("failed to spawn main thread");
     handler.join().unwrap();
 }
 
@@ -79,7 +84,12 @@ fn real_main() {
 
     for (file_idx, path) in paths.iter().enumerate() {
         if output_dir.is_some() && total_files > 1 {
-            eprint!("\r[{}/{}] {}                    ", file_idx + 1, total_files, path);
+            eprint!(
+                "\r[{}/{}] {}                    ",
+                file_idx + 1,
+                total_files,
+                path
+            );
         }
 
         let data = match fs::read(path) {
@@ -99,14 +109,23 @@ fn real_main() {
             }
         };
 
-            // Dump bytecode if requested
+        // Dump bytecode if requested
         if dump_bc {
             for (fi, f) in chunk.functions.iter().enumerate() {
                 if let Some(target) = emit_func {
-                    if fi != target { continue; }
+                    if fi != target {
+                        continue;
+                    }
                 }
-                let func_name = chunk.get_string(f.debug.func_name_index).unwrap_or_else(|| format!("fn#{}", fi));
-                println!("=== fn #{}: {} ({} instructions) ===", fi, func_name, f.instructions.len());
+                let func_name = chunk
+                    .get_string(f.debug.func_name_index)
+                    .unwrap_or_else(|| format!("fn#{}", fi));
+                println!(
+                    "=== fn #{}: {} ({} instructions) ===",
+                    fi,
+                    func_name,
+                    f.instructions.len()
+                );
                 for (pc, insn) in f.instructions.iter().enumerate() {
                     let const_str = match insn.op {
                         lantern_bytecode::opcode::OpCode::GetTableKS
@@ -114,13 +133,19 @@ fn real_main() {
                         | lantern_bytecode::opcode::OpCode::NameCall => {
                             if pc + 1 < f.instructions.len() {
                                 let aux = f.instructions[pc + 1].aux;
-                                chunk.get_string(aux as usize).map(|s| format!(" ; \"{}\"", s))
-                            } else { None }
+                                chunk
+                                    .get_string(aux as usize)
+                                    .map(|s| format!(" ; \"{}\"", s))
+                            } else {
+                                None
+                            }
                         }
                         lantern_bytecode::opcode::OpCode::LoadK => {
                             if let Some(c) = f.constants.get(insn.d as usize) {
                                 Some(format!(" ; {:?}", c))
-                            } else { None }
+                            } else {
+                                None
+                            }
                         }
                         lantern_bytecode::opcode::OpCode::GetImport => {
                             let id = insn.d as u32;
@@ -135,16 +160,29 @@ fn real_main() {
                             }
                             if !parts.is_empty() {
                                 Some(format!(" ; {}", parts.join(".")))
-                            } else { None }
+                            } else {
+                                None
+                            }
                         }
                         _ => None,
                     };
                     let aux_str = if insn.op.has_aux() {
                         format!(" aux=0x{:08X}", insn.aux)
-                    } else { String::new() };
-                    println!("  {:4}  {:?}\tA={} B={} C={} D={} E={}{}{}",
-                        pc, insn.op, insn.a, insn.b, insn.c, insn.d, insn.e,
-                        aux_str, const_str.unwrap_or_default());
+                    } else {
+                        String::new()
+                    };
+                    println!(
+                        "  {:4}  {:?}\tA={} B={} C={} D={} E={}{}{}",
+                        pc,
+                        insn.op,
+                        insn.a,
+                        insn.b,
+                        insn.c,
+                        insn.d,
+                        insn.e,
+                        aux_str,
+                        const_str.unwrap_or_default()
+                    );
                 }
                 println!();
             }
@@ -177,7 +215,10 @@ fn real_main() {
 
                 if std::env::var("DEBUG_SCOPES").is_ok() && emit_func == Some(func_idx) {
                     for scope in bc_func.debug.scopes.all_scopes() {
-                        eprintln!("  r{} '{}' pc={}..{}", scope.register, scope.name, scope.pc_range.start, scope.pc_range.end);
+                        eprintln!(
+                            "  r{} '{}' pc={}..{}",
+                            scope.register, scope.name, scope.pc_range.start, scope.pc_range.end
+                        );
                     }
                 }
 
@@ -235,8 +276,7 @@ fn real_main() {
             }
 
             if verbose && !file_mode {
-                let stmt_count: usize =
-                    hir.cfg.node_weights().map(|b| b.stmts.len()).sum();
+                let stmt_count: usize = hir.cfg.node_weights().map(|b| b.stmts.len()).sum();
                 println!(
                     "  fn #{}: {} — {} blocks, {} edges, {} exprs, {} stmts ({:.2?})",
                     func_idx,
@@ -279,9 +319,8 @@ fn real_main() {
                 .map(|f| f.expect("all functions should be lifted"))
                 .collect();
 
-            let (lua_source, emit_duration) = timing::timed(|| {
-                lantern_emit::emit_file(&funcs, &child_protos, chunk.main)
-            });
+            let (lua_source, emit_duration) =
+                timing::timed(|| lantern_emit::emit_file(&funcs, &child_protos, chunk.main));
 
             let (output, format_duration) = if no_format {
                 (lua_source, std::time::Duration::ZERO)
@@ -293,7 +332,9 @@ fn real_main() {
                 // Write to output directory, preserving relative path structure
                 let src_path = Path::new(path);
                 let rel = if let Some(ref base) = base_dir {
-                    src_path.strip_prefix(base).unwrap_or(src_path.file_name().map(Path::new).unwrap_or(src_path))
+                    src_path
+                        .strip_prefix(base)
+                        .unwrap_or(src_path.file_name().map(Path::new).unwrap_or(src_path))
                 } else {
                     src_path
                 };
@@ -311,13 +352,13 @@ fn real_main() {
                 print!("{}", output);
             }
             if verbose {
-                eprintln!("-- file emit: {:.2?}, format: {:.2?} --", emit_duration, format_duration);
+                eprintln!(
+                    "-- file emit: {:.2?}, format: {:.2?} --",
+                    emit_duration, format_duration
+                );
             }
         } else if verbose && emit_func.is_none() {
-            println!(
-                "Parsed: {} ({:.2?})",
-                path, parse_duration,
-            );
+            println!("Parsed: {} ({:.2?})", path, parse_duration,);
         }
 
         report.add(file_timings);
@@ -354,8 +395,15 @@ fn dump_cfg_blocks(hir: &lantern_hir::func::HirFunc) {
         let block = &hir.cfg[node];
         let then_n = lantern_hir::cfg::then_successor(&hir.cfg, node);
         let else_n = lantern_hir::cfg::else_successor(&hir.cfg, node);
-        eprintln!("  block {:?} (pc {:?}): {} stmts, then={:?} else={:?}, terminator={:?}",
-            node, block.pc_range, block.stmts.len(), then_n, else_n, block.terminator);
+        eprintln!(
+            "  block {:?} (pc {:?}): {} stmts, then={:?} else={:?}, terminator={:?}",
+            node,
+            block.pc_range,
+            block.stmts.len(),
+            then_n,
+            else_n,
+            block.terminator
+        );
         for (i, stmt) in block.stmts.iter().enumerate() {
             eprintln!("    stmt[{}]: {:?}", i, stmt);
         }

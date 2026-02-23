@@ -216,8 +216,9 @@ fn apply_table_fold(
                 hash.push((*key, *value));
             }
             TableWrite::Field { field, value } => {
-                let key_expr =
-                    exprs.alloc(HirExpr::Literal(LuaValue::String(field.as_bytes().to_vec())));
+                let key_expr = exprs.alloc(HirExpr::Literal(LuaValue::String(
+                    field.as_bytes().to_vec(),
+                )));
                 hash.push((key_expr, *value));
             }
         }
@@ -252,12 +253,10 @@ fn expr_references_var(
         HirExpr::Var(v) => *v == var_id,
         HirExpr::FieldAccess { table, .. } => expr_references_var(exprs, *table, var_id),
         HirExpr::IndexAccess { table, key } => {
-            expr_references_var(exprs, *table, var_id)
-                || expr_references_var(exprs, *key, var_id)
+            expr_references_var(exprs, *table, var_id) || expr_references_var(exprs, *key, var_id)
         }
         HirExpr::Binary { left, right, .. } => {
-            expr_references_var(exprs, *left, var_id)
-                || expr_references_var(exprs, *right, var_id)
+            expr_references_var(exprs, *left, var_id) || expr_references_var(exprs, *right, var_id)
         }
         HirExpr::Unary { operand, .. } => expr_references_var(exprs, *operand, var_id),
         HirExpr::Call { func, args, .. } => {
@@ -271,25 +270,26 @@ fn expr_references_var(
         HirExpr::Table { array, hash } => {
             array.iter().any(|a| expr_references_var(exprs, *a, var_id))
                 || hash.iter().any(|(k, v)| {
-                    expr_references_var(exprs, *k, var_id)
-                        || expr_references_var(exprs, *v, var_id)
+                    expr_references_var(exprs, *k, var_id) || expr_references_var(exprs, *v, var_id)
                 })
         }
-        HirExpr::Concat(operands) => {
-            operands.iter().any(|o| expr_references_var(exprs, *o, var_id))
-        }
-        HirExpr::IfExpr { condition, then_expr, else_expr } => {
+        HirExpr::Concat(operands) => operands
+            .iter()
+            .any(|o| expr_references_var(exprs, *o, var_id)),
+        HirExpr::IfExpr {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
             expr_references_var(exprs, *condition, var_id)
                 || expr_references_var(exprs, *then_expr, var_id)
                 || expr_references_var(exprs, *else_expr, var_id)
         }
         HirExpr::Select { source, .. } => expr_references_var(exprs, *source, var_id),
-        HirExpr::Closure { captures, .. } => {
-            captures.iter().any(|c| match &c.source {
-                lantern_hir::expr::CaptureSource::Var(v) => *v == var_id,
-                _ => false,
-            })
-        }
+        HirExpr::Closure { captures, .. } => captures.iter().any(|c| match &c.source {
+            lantern_hir::expr::CaptureSource::Var(v) => *v == var_id,
+            _ => false,
+        }),
         _ => false,
     }
 }

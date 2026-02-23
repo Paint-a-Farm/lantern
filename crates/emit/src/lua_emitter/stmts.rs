@@ -32,7 +32,12 @@ impl<'a> LuaEmitter<'a> {
         for (node_idx, (start_pc, _end_pc)) in &blocks {
             // Block label
             self.write_indent();
-            let _ = writeln!(self.output, "-- block_{} (pc {})", node_idx.index(), start_pc);
+            let _ = writeln!(
+                self.output,
+                "-- block_{} (pc {})",
+                node_idx.index(),
+                start_pc
+            );
 
             let block = &self.func.cfg[*node_idx];
 
@@ -203,7 +208,13 @@ impl<'a> LuaEmitter<'a> {
                 self.output.push('\n');
             }
 
-            HirStmt::NumericFor { var, start, limit, step, body } => {
+            HirStmt::NumericFor {
+                var,
+                start,
+                limit,
+                step,
+                body,
+            } => {
                 self.write_indent();
                 let name = self.var_name(*var);
                 let _ = write!(self.output, "for {} = ", name);
@@ -229,7 +240,11 @@ impl<'a> LuaEmitter<'a> {
                 self.output.push_str("end\n");
             }
 
-            HirStmt::GenericFor { vars, iterators, body } => {
+            HirStmt::GenericFor {
+                vars,
+                iterators,
+                body,
+            } => {
                 self.write_indent();
                 self.output.push_str("for ");
                 for (i, v) in vars.iter().enumerate() {
@@ -348,7 +363,11 @@ impl<'a> LuaEmitter<'a> {
             LValue::Global(name) => (name.clone(), ""),
             LValue::Local(var_id) => {
                 let name = self.var_name(*var_id);
-                let prefix = if self.declared.contains(var_id) { "" } else { "local " };
+                let prefix = if self.declared.contains(var_id) {
+                    ""
+                } else {
+                    "local "
+                };
                 (name, prefix)
             }
             _ => return false,
@@ -392,7 +411,11 @@ impl<'a> LuaEmitter<'a> {
     ///   `Call(Closure, ..)` → `(function() ... end)(args)` (IIFE needs parens)
     fn emit_expr_stmt(&mut self, expr: ExprId) {
         match self.func.exprs.get(expr) {
-            HirExpr::Binary { op: BinOp::Or, left, right } => {
+            HirExpr::Binary {
+                op: BinOp::Or,
+                left,
+                right,
+            } => {
                 let (left, right) = (*left, *right);
                 // Check for ternary: `(a and b) or c`
                 //
@@ -403,8 +426,11 @@ impl<'a> LuaEmitter<'a> {
                 //
                 // Only decompose as if/then/else when BOTH branches are calls
                 // (i.e., both have side effects worth executing).
-                if let HirExpr::Binary { op: BinOp::And, left: cond, right: then_expr } =
-                    self.func.exprs.get(left)
+                if let HirExpr::Binary {
+                    op: BinOp::And,
+                    left: cond,
+                    right: then_expr,
+                } = self.func.exprs.get(left)
                 {
                     let (cond, then_expr) = (*cond, *then_expr);
                     let then_is_call = self.expr_is_call_like(then_expr);
@@ -466,7 +492,11 @@ impl<'a> LuaEmitter<'a> {
                     self.output.push_str("end\n");
                 }
             }
-            HirExpr::Binary { op: BinOp::And, left, right } => {
+            HirExpr::Binary {
+                op: BinOp::And,
+                left,
+                right,
+            } => {
                 let (left, right) = (*left, *right);
                 self.write_indent();
                 self.output.push_str("if ");
@@ -494,10 +524,16 @@ impl<'a> LuaEmitter<'a> {
     fn expr_is_call_like(&self, expr: ExprId) -> bool {
         match self.func.exprs.get(expr) {
             HirExpr::Call { .. } | HirExpr::MethodCall { .. } => true,
-            HirExpr::Binary { op: BinOp::And, right, .. }
-            | HirExpr::Binary { op: BinOp::Or, right, .. } => {
-                self.expr_is_call_like(*right)
+            HirExpr::Binary {
+                op: BinOp::And,
+                right,
+                ..
             }
+            | HirExpr::Binary {
+                op: BinOp::Or,
+                right,
+                ..
+            } => self.expr_is_call_like(*right),
             _ => false,
         }
     }

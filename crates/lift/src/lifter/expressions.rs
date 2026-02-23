@@ -65,7 +65,13 @@ impl<'a> super::Lifter<'a> {
                 }
                 _ => format!("__field_{}", k1),
             };
-            expr = self.alloc_expr(HirExpr::FieldAccess { table: expr, field: field1 }, pc);
+            expr = self.alloc_expr(
+                HirExpr::FieldAccess {
+                    table: expr,
+                    field: field1,
+                },
+                pc,
+            );
         }
 
         if count >= 3 {
@@ -76,13 +82,25 @@ impl<'a> super::Lifter<'a> {
                 }
                 _ => format!("__field_{}", k2),
             };
-            expr = self.alloc_expr(HirExpr::FieldAccess { table: expr, field: field2 }, pc);
+            expr = self.alloc_expr(
+                HirExpr::FieldAccess {
+                    table: expr,
+                    field: field2,
+                },
+                pc,
+            );
         }
 
         expr
     }
 
-    pub(super) fn lift_binary(&mut self, op: BinOp, insn: &Instruction, pc: usize, rhs_const: bool) -> usize {
+    pub(super) fn lift_binary(
+        &mut self,
+        op: BinOp,
+        insn: &Instruction,
+        pc: usize,
+        rhs_const: bool,
+    ) -> usize {
         let reg = self.reg_ref(insn.a, pc);
         let left = self.alloc_expr(HirExpr::Reg(self.reg_ref(insn.b, pc)), pc);
         let right = if rhs_const {

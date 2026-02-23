@@ -7,10 +7,10 @@ use lantern_hir::cfg::{EdgeKind, Terminator};
 use lantern_hir::func::HirFunc;
 use lantern_hir::stmt::{ElseIfClause, HirStmt};
 
-use super::LoopCtx;
 use super::cfg_helpers::{self, branch_successors, find_join_point, negate_condition};
 use super::guard::{ends_with_exit, is_guard_clause};
 use super::structure_region;
+use super::LoopCtx;
 
 /// Follow unconditional jumps from `start` to find the effective target.
 /// Returns `start` itself if it's not a pure Jump block, otherwise follows

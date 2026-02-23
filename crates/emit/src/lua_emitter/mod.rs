@@ -97,7 +97,11 @@ impl<'a> LuaEmitter<'a> {
             let stmts = &self.func.cfg[entry].stmts;
             // Strip trailing bare return (implicit in Lua)
             let stmts = if let Some(HirStmt::Return(values)) = stmts.last() {
-                if values.is_empty() { &stmts[..stmts.len() - 1] } else { stmts }
+                if values.is_empty() {
+                    &stmts[..stmts.len() - 1]
+                } else {
+                    stmts
+                }
             } else {
                 stmts
             };

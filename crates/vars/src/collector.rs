@@ -166,8 +166,7 @@ fn collect_from_stmt(func: &HirFunc, stmt: &HirStmt, out: &mut Vec<RegAccess>) {
             }
         }
 
-        HirStmt::FunctionDef { func_expr, .. }
-        | HirStmt::LocalFunctionDef { func_expr, .. } => {
+        HirStmt::FunctionDef { func_expr, .. } | HirStmt::LocalFunctionDef { func_expr, .. } => {
             collect_from_expr(func, *func_expr, out);
         }
 
@@ -185,7 +184,9 @@ fn collect_from_terminator(func: &HirFunc, term: &Terminator, out: &mut Vec<RegA
                 collect_from_expr(func, *v, out);
             }
         }
-        Terminator::ForNumPrep { start, limit, step, .. } => {
+        Terminator::ForNumPrep {
+            start, limit, step, ..
+        } => {
             collect_from_expr(func, *start, out);
             collect_from_expr(func, *limit, out);
             if let Some(s) = step {

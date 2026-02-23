@@ -43,10 +43,7 @@ impl<'a> super::Lifter<'a> {
 
             OpCode::LoadN => {
                 let reg = self.reg_ref(insn.a, pc);
-                let expr = self.alloc_expr(
-                    HirExpr::Literal(LuaValue::Number(insn.d as f64)),
-                    pc,
-                );
+                let expr = self.alloc_expr(HirExpr::Literal(LuaValue::Number(insn.d as f64)), pc);
                 self.emit_assign_reg(reg, expr);
                 1
             }
@@ -244,9 +241,7 @@ impl<'a> super::Lifter<'a> {
             OpCode::Concat => {
                 let reg = self.reg_ref(insn.a, pc);
                 let operands: Vec<ExprId> = (insn.b..=insn.c)
-                    .map(|r| {
-                        self.alloc_expr(HirExpr::Reg(self.reg_ref(r, pc)), pc)
-                    })
+                    .map(|r| self.alloc_expr(HirExpr::Reg(self.reg_ref(r, pc)), pc))
                     .collect();
                 let expr = self.alloc_expr(HirExpr::Concat(operands), pc);
                 self.emit_assign_reg(reg, expr);
@@ -298,13 +293,9 @@ impl<'a> super::Lifter<'a> {
                         .map(|i| {
                             // Pop the RegAssign for this element register to capture
                             // the actual value expression, removing the dead temp.
-                            self.pop_last_reg_assign(source_reg + i)
-                                .unwrap_or_else(|| {
-                                    self.alloc_expr(
-                                        HirExpr::Reg(self.reg_ref(source_reg + i, pc)),
-                                        pc,
-                                    )
-                                })
+                            self.pop_last_reg_assign(source_reg + i).unwrap_or_else(|| {
+                                self.alloc_expr(HirExpr::Reg(self.reg_ref(source_reg + i, pc)), pc)
+                            })
                         })
                         .collect()
                 };
@@ -391,10 +382,7 @@ impl<'a> super::Lifter<'a> {
                     let nargs = insn.b - 1;
                     (0..nargs)
                         .map(|i| {
-                            self.alloc_expr(
-                                HirExpr::Reg(self.reg_ref(insn.a + 1 + i, pc)),
-                                pc,
-                            )
+                            self.alloc_expr(HirExpr::Reg(self.reg_ref(insn.a + 1 + i, pc)), pc)
                         })
                         .collect()
                 };
@@ -443,12 +431,7 @@ impl<'a> super::Lifter<'a> {
                 } else {
                     let nvals = insn.b - 1;
                     (0..nvals)
-                        .map(|i| {
-                            self.alloc_expr(
-                                HirExpr::Reg(self.reg_ref(insn.a + i, pc)),
-                                pc,
-                            )
-                        })
+                        .map(|i| self.alloc_expr(HirExpr::Reg(self.reg_ref(insn.a + i, pc)), pc))
                         .collect()
                 };
 
@@ -466,9 +449,12 @@ impl<'a> super::Lifter<'a> {
                 };
                 let target = ((pc + 1) as i64 + offset as i64) as usize;
                 self.add_jump_edge(target);
-                self.hir.cfg[self.current_block].terminator =
-                    lantern_hir::cfg::Terminator::Jump;
-                if insn.op == OpCode::JumpX { 1 } else { 1 }
+                self.hir.cfg[self.current_block].terminator = lantern_hir::cfg::Terminator::Jump;
+                if insn.op == OpCode::JumpX {
+                    1
+                } else {
+                    1
+                }
             }
 
             // Conditional branches
@@ -482,7 +468,13 @@ impl<'a> super::Lifter<'a> {
             OpCode::JumpIf => {
                 // JumpIf = jump when truthy → original source had `if not cond then`
                 let inner = self.alloc_expr(HirExpr::Reg(self.reg_ref(insn.a, pc)), pc);
-                let cond = self.alloc_expr(HirExpr::Unary { op: UnOp::Not, operand: inner }, pc);
+                let cond = self.alloc_expr(
+                    HirExpr::Unary {
+                        op: UnOp::Not,
+                        operand: inner,
+                    },
+                    pc,
+                );
                 let target = ((pc + 1) as i64 + insn.d as i64) as usize;
                 self.emit_branch(cond, pc + 1, target);
                 1
@@ -511,18 +503,22 @@ impl<'a> super::Lifter<'a> {
             | OpCode::JumpIfNotLt => {
                 let left = self.alloc_expr(HirExpr::Reg(self.reg_ref(insn.a, pc)), pc);
                 let right = self.alloc_expr(
-                    HirExpr::Reg(RegRef { register: insn.aux as u8, pc, has_aux: false }),
+                    HirExpr::Reg(RegRef {
+                        register: insn.aux as u8,
+                        pc,
+                        has_aux: false,
+                    }),
                     pc,
                 );
 
                 // Invert: the condition is what makes you NOT jump (= stay in then-body)
                 let op = match insn.op {
-                    OpCode::JumpIfNotEq => BinOp::CompareEq,   // source: if a == b
-                    OpCode::JumpIfNotLe => BinOp::CompareLe,   // source: if a <= b
-                    OpCode::JumpIfNotLt => BinOp::CompareLt,   // source: if a < b
-                    OpCode::JumpIfEq => BinOp::CompareNe,      // source: if a ~= b
-                    OpCode::JumpIfLe => BinOp::CompareGt,      // source: if a > b
-                    OpCode::JumpIfLt => BinOp::CompareGe,      // source: if a >= b
+                    OpCode::JumpIfNotEq => BinOp::CompareEq, // source: if a == b
+                    OpCode::JumpIfNotLe => BinOp::CompareLe, // source: if a <= b
+                    OpCode::JumpIfNotLt => BinOp::CompareLt, // source: if a < b
+                    OpCode::JumpIfEq => BinOp::CompareNe,    // source: if a ~= b
+                    OpCode::JumpIfLe => BinOp::CompareGt,    // source: if a > b
+                    OpCode::JumpIfLt => BinOp::CompareGe,    // source: if a >= b
                     _ => unreachable!(),
                 };
 
@@ -562,7 +558,11 @@ impl<'a> super::Lifter<'a> {
                 // Invert: condition is what keeps us in fallthrough (then-body)
                 // not_flag=0 → jump when equal → condition is ~= (stay when not equal)
                 // not_flag=1 → jump when not-equal → condition is == (stay when equal)
-                let op = if not_flag { BinOp::CompareEq } else { BinOp::CompareNe };
+                let op = if not_flag {
+                    BinOp::CompareEq
+                } else {
+                    BinOp::CompareNe
+                };
 
                 let cond = self.alloc_expr(HirExpr::Binary { op, left, right }, pc);
                 let target = ((pc + 1) as i64 + insn.d as i64) as usize;
@@ -580,7 +580,10 @@ impl<'a> super::Lifter<'a> {
 
                 // Look up loop variable name from debug info — the user-visible
                 // variable is at A+2 and its scope starts at the body (pc+1).
-                let loop_var_name = self.func.debug.scopes
+                let loop_var_name = self
+                    .func
+                    .debug
+                    .scopes
                     .lookup(base + 2, pc + 1)
                     .map(|s| s.to_string());
 
@@ -602,14 +605,20 @@ impl<'a> super::Lifter<'a> {
                     self.hir.cfg.add_edge(
                         self.current_block,
                         body_node,
-                        HirEdge { kind: EdgeKind::LoopBack, args: Vec::new() },
+                        HirEdge {
+                            kind: EdgeKind::LoopBack,
+                            args: Vec::new(),
+                        },
                     );
                 }
                 if let Some(&exit_node) = self.block_map.get(&exit_pc) {
                     self.hir.cfg.add_edge(
                         self.current_block,
                         exit_node,
-                        HirEdge { kind: EdgeKind::LoopExit, args: Vec::new() },
+                        HirEdge {
+                            kind: EdgeKind::LoopExit,
+                            args: Vec::new(),
+                        },
                     );
                 }
                 1
@@ -620,22 +629,26 @@ impl<'a> super::Lifter<'a> {
                 let exit_pc = pc + 1;
 
                 self.hir.cfg[self.current_block].terminator =
-                    lantern_hir::cfg::Terminator::ForNumBack {
-                        base_reg: insn.a,
-                    };
+                    lantern_hir::cfg::Terminator::ForNumBack { base_reg: insn.a };
 
                 if let Some(&body_node) = self.block_map.get(&body_pc) {
                     self.hir.cfg.add_edge(
                         self.current_block,
                         body_node,
-                        HirEdge { kind: EdgeKind::LoopBack, args: Vec::new() },
+                        HirEdge {
+                            kind: EdgeKind::LoopBack,
+                            args: Vec::new(),
+                        },
                     );
                 }
                 if let Some(&exit_node) = self.block_map.get(&exit_pc) {
                     self.hir.cfg.add_edge(
                         self.current_block,
                         exit_node,
-                        HirEdge { kind: EdgeKind::LoopExit, args: Vec::new() },
+                        HirEdge {
+                            kind: EdgeKind::LoopExit,
+                            args: Vec::new(),
+                        },
                     );
                 }
                 1
@@ -665,8 +678,7 @@ impl<'a> super::Lifter<'a> {
 
                 let target = ((pc + 1) as i64 + insn.d as i64) as usize;
                 self.add_jump_edge(target);
-                self.hir.cfg[self.current_block].terminator =
-                    lantern_hir::cfg::Terminator::Jump;
+                self.hir.cfg[self.current_block].terminator = lantern_hir::cfg::Terminator::Jump;
                 1
             }
 
@@ -684,7 +696,9 @@ impl<'a> super::Lifter<'a> {
                 // A+3..A+2+var_count and their scope starts at the body.
                 let loop_var_names: Vec<Option<String>> = (0..var_count)
                     .map(|i| {
-                        self.func.debug.scopes
+                        self.func
+                            .debug
+                            .scopes
                             .lookup(base + 3 + i, body_pc)
                             .map(|s| s.to_string())
                     })
@@ -703,14 +717,20 @@ impl<'a> super::Lifter<'a> {
                     self.hir.cfg.add_edge(
                         self.current_block,
                         body_node,
-                        HirEdge { kind: EdgeKind::LoopBack, args: Vec::new() },
+                        HirEdge {
+                            kind: EdgeKind::LoopBack,
+                            args: Vec::new(),
+                        },
                     );
                 }
                 if let Some(&exit_node) = self.block_map.get(&exit_pc) {
                     self.hir.cfg.add_edge(
                         self.current_block,
                         exit_node,
-                        HirEdge { kind: EdgeKind::LoopExit, args: Vec::new() },
+                        HirEdge {
+                            kind: EdgeKind::LoopExit,
+                            args: Vec::new(),
+                        },
                     );
                 }
                 2 // AUX
@@ -724,11 +744,12 @@ impl<'a> super::Lifter<'a> {
                 //   We reverse-lookup through child_protos to get the local proto index
                 let proto_id = if insn.op == OpCode::DupClosure {
                     match &self.func.constants[insn.d as usize] {
-                        Constant::Closure(global_idx) => {
-                            self.func.child_protos.iter()
-                                .position(|&cp| cp == *global_idx)
-                                .unwrap_or(*global_idx)
-                        }
+                        Constant::Closure(global_idx) => self
+                            .func
+                            .child_protos
+                            .iter()
+                            .position(|&cp| cp == *global_idx)
+                            .unwrap_or(*global_idx),
                         _ => insn.d as usize,
                     }
                 } else {
@@ -759,10 +780,7 @@ impl<'a> super::Lifter<'a> {
                     capture_pc += 1;
                 }
 
-                let expr = self.alloc_expr(
-                    HirExpr::Closure { proto_id, captures },
-                    pc,
-                );
+                let expr = self.alloc_expr(HirExpr::Closure { proto_id, captures }, pc);
                 self.emit_assign_reg(reg, expr);
                 // Return total PCs consumed: 1 for NEWCLOSURE + N for CAPTUREs
                 capture_pc - pc
@@ -824,7 +842,6 @@ impl<'a> super::Lifter<'a> {
                 self.pending_fastcall = insn.a;
                 2 // has AUX
             }
-
         }
     }
 }

@@ -50,7 +50,10 @@ pub fn collapse_multi_returns(func: &mut HirFunc) {
             let multi = HirStmt::MultiAssign { targets, values };
 
             // Replace the range [start..start+count) with the single MultiAssign
-            new_stmts.splice(group.start_idx..group.start_idx + group.count, std::iter::once(multi));
+            new_stmts.splice(
+                group.start_idx..group.start_idx + group.count,
+                std::iter::once(multi),
+            );
         }
 
         func.cfg[node_idx].stmts = new_stmts;
@@ -131,10 +134,7 @@ fn is_multi_return_source(func: &HirFunc, expr_id: ExprId) -> bool {
 
 /// Check if a statement is `Assign { target, Select { source, index } }`.
 /// Returns (target, source_expr, index).
-fn get_select_assign(
-    stmt: &HirStmt,
-    func: &HirFunc,
-) -> Option<(LValue, ExprId, u8)> {
+fn get_select_assign(stmt: &HirStmt, func: &HirFunc) -> Option<(LValue, ExprId, u8)> {
     if let HirStmt::Assign { target, value } = stmt {
         if let HirExpr::Select { source, index } = func.exprs.get(*value) {
             return Some((target.clone(), *source, *index));
@@ -144,11 +144,7 @@ fn get_select_assign(
 }
 
 /// Update the result_count of a Call or MethodCall expression.
-fn update_result_count(
-    exprs: &mut lantern_hir::arena::ExprArena,
-    expr_id: ExprId,
-    count: u8,
-) {
+fn update_result_count(exprs: &mut lantern_hir::arena::ExprArena, expr_id: ExprId, count: u8) {
     match exprs.get_mut(expr_id) {
         HirExpr::Call { result_count, .. } => *result_count = count,
         HirExpr::MethodCall { result_count, .. } => *result_count = count,

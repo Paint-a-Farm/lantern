@@ -93,7 +93,11 @@ impl ExprArena {
         use crate::types::{BinOp, UnOp};
 
         // Double negation: not(not x) → x
-        if let HirExpr::Unary { op: UnOp::Not, operand } = self.get(condition) {
+        if let HirExpr::Unary {
+            op: UnOp::Not,
+            operand,
+        } = self.get(condition)
+        {
             return *operand;
         }
 
@@ -109,7 +113,11 @@ impl ExprArena {
                 _ => None,
             };
             if let Some(inv_op) = inv_op {
-                return self.alloc(HirExpr::Binary { op: inv_op, left, right });
+                return self.alloc(HirExpr::Binary {
+                    op: inv_op,
+                    left,
+                    right,
+                });
             }
         }
 

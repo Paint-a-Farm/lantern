@@ -95,11 +95,22 @@ fn transform_stmt(func: &mut HirFunc, stmt: HirStmt) -> HirStmt {
             if_stmt = flip_elseif_guard(func, if_stmt);
 
             // Strip trailing empty elseif clauses (artifact of structuring).
-            if let HirStmt::If { condition, then_body, mut elseif_clauses, else_body } = if_stmt {
+            if let HirStmt::If {
+                condition,
+                then_body,
+                mut elseif_clauses,
+                else_body,
+            } = if_stmt
+            {
                 while elseif_clauses.last().is_some_and(|c| c.body.is_empty()) {
                     elseif_clauses.pop();
                 }
-                if_stmt = HirStmt::If { condition, then_body, elseif_clauses, else_body };
+                if_stmt = HirStmt::If {
+                    condition,
+                    then_body,
+                    elseif_clauses,
+                    else_body,
+                };
             }
 
             if_stmt
@@ -112,14 +123,24 @@ fn transform_stmt(func: &mut HirFunc, stmt: HirStmt) -> HirStmt {
             body: transform_stmts(func, body),
             condition,
         },
-        HirStmt::NumericFor { var, start, limit, step, body } => HirStmt::NumericFor {
+        HirStmt::NumericFor {
+            var,
+            start,
+            limit,
+            step,
+            body,
+        } => HirStmt::NumericFor {
             var,
             start,
             limit,
             step,
             body: transform_stmts(func, body),
         },
-        HirStmt::GenericFor { vars, iterators, body } => HirStmt::GenericFor {
+        HirStmt::GenericFor {
+            vars,
+            iterators,
+            body,
+        } => HirStmt::GenericFor {
             vars,
             iterators,
             body: transform_stmts(func, body),

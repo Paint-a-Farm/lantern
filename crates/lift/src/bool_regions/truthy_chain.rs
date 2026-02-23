@@ -45,9 +45,7 @@ pub struct TruthyChain {
 ///
 /// Returns the found chains and a set of PCs that should be suppressed
 /// from block boundary creation.
-pub fn detect_truthy_chains(
-    instructions: &[Instruction],
-) -> (Vec<TruthyChain>, FxHashSet<usize>) {
+pub fn detect_truthy_chains(instructions: &[Instruction]) -> (Vec<TruthyChain>, FxHashSet<usize>) {
     let chains = find_truthy_chains(instructions);
     let mut suppressed = FxHashSet::default();
 

@@ -44,10 +44,10 @@ impl<'a> super::Lifter<'a> {
                 // need the condition negated. Unlike JumpIfEq/JumpIfNotEq which
                 // encode direction in the opcode, JumpXEqK* uses the same form
                 // for both chain types — we disambiguate via jump target.
-                let cond_expr = if matches!(insn.op,
-                    OpCode::JumpXEqKNil | OpCode::JumpXEqKB |
-                    OpCode::JumpXEqKN | OpCode::JumpXEqKS)
-                {
+                let cond_expr = if matches!(
+                    insn.op,
+                    OpCode::JumpXEqKNil | OpCode::JumpXEqKB | OpCode::JumpXEqKN | OpCode::JumpXEqKS
+                ) {
                     let target = ((scan_pc + 1) as i64 + insn.d as i64) as usize;
                     if target == end_pc && is_or_chain == Some(false) {
                         // AND chain bail-out: source condition is the negation
@@ -61,7 +61,11 @@ impl<'a> super::Lifter<'a> {
                 };
                 conditions.push(cond_expr);
                 // Advance past AUX word if needed
-                scan_pc += if crate::bool_regions::has_aux_word(insn.op) { 2 } else { 1 };
+                scan_pc += if crate::bool_regions::has_aux_word(insn.op) {
+                    2
+                } else {
+                    1
+                };
                 continue;
             }
 
@@ -141,9 +145,7 @@ impl<'a> super::Lifter<'a> {
         // But the value load BEFORE the first jump may start earlier.
         // For our detection, the chain `start_pc` is the first jump PC
         // (since find_truthy_chain_start currently returns the jump itself).
-        let chain_idx = self.truthy_chains.iter().position(|c| {
-            c.start_pc == pc
-        })?;
+        let chain_idx = self.truthy_chains.iter().position(|c| c.start_pc == pc)?;
 
         // Copy fields to avoid borrow issues
         let end_pc = self.truthy_chains[chain_idx].end_pc;
@@ -256,7 +258,10 @@ impl<'a> super::Lifter<'a> {
     ///
     /// Produces: `Rb = a and b or c`
     pub(super) fn try_lift_and_or_ternary(&mut self, pc: usize) -> Option<usize> {
-        let ternary_idx = self.and_or_ternaries.iter().position(|t| t.and_jump_pc == pc)?;
+        let ternary_idx = self
+            .and_or_ternaries
+            .iter()
+            .position(|t| t.and_jump_pc == pc)?;
 
         let and_jump_pc = self.and_or_ternaries[ternary_idx].and_jump_pc;
         let compound_jump_pcs = self.and_or_ternaries[ternary_idx].compound_jump_pcs.clone();
@@ -293,9 +298,11 @@ impl<'a> super::Lifter<'a> {
 
             // Extract this condition.
             let cond_operand = if cond_is_comparison {
-                let cond = self.lift_bool_condition(cond_insn, cond_pc).unwrap_or_else(|| {
-                    self.alloc_expr(HirExpr::Reg(self.reg_ref(cond_insn.a, cond_pc)), cond_pc)
-                });
+                let cond = self
+                    .lift_bool_condition(cond_insn, cond_pc)
+                    .unwrap_or_else(|| {
+                        self.alloc_expr(HirExpr::Reg(self.reg_ref(cond_insn.a, cond_pc)), cond_pc)
+                    });
                 self.negate_ternary_condition(cond_insn, cond, cond_pc)
             } else {
                 self.pop_last_reg_assign(cond_insn.a).unwrap_or_else(|| {
@@ -332,7 +339,10 @@ impl<'a> super::Lifter<'a> {
         }
         // The "b" operand: the value in result_reg loaded by the b-segment
         let b_operand = self.pop_last_reg_assign(result_reg).unwrap_or_else(|| {
-            self.alloc_expr(HirExpr::Reg(self.reg_ref(result_reg, or_jump_pc)), or_jump_pc)
+            self.alloc_expr(
+                HirExpr::Reg(self.reg_ref(result_reg, or_jump_pc)),
+                or_jump_pc,
+            )
         });
 
         // Lift the "c" part: instructions between fallback_pc and join_pc
@@ -344,7 +354,10 @@ impl<'a> super::Lifter<'a> {
         }
         // The "c" operand: the value in result_reg loaded by the c-segment
         let c_operand = self.pop_last_reg_assign(result_reg).unwrap_or_else(|| {
-            self.alloc_expr(HirExpr::Reg(self.reg_ref(result_reg, fallback_pc)), fallback_pc)
+            self.alloc_expr(
+                HirExpr::Reg(self.reg_ref(result_reg, fallback_pc)),
+                fallback_pc,
+            )
         });
 
         // Build: (a1 and a2 and ...) and b or c
@@ -425,9 +438,11 @@ impl<'a> super::Lifter<'a> {
 
             // Extract this condition.
             let cond_operand = if cond_is_comparison {
-                let cond = self.lift_bool_condition(cond_insn, cond_pc).unwrap_or_else(|| {
-                    self.alloc_expr(HirExpr::Reg(self.reg_ref(cond_insn.a, cond_pc)), cond_pc)
-                });
+                let cond = self
+                    .lift_bool_condition(cond_insn, cond_pc)
+                    .unwrap_or_else(|| {
+                        self.alloc_expr(HirExpr::Reg(self.reg_ref(cond_insn.a, cond_pc)), cond_pc)
+                    });
                 self.negate_ternary_condition(cond_insn, cond, cond_pc)
             } else {
                 self.pop_last_reg_assign(cond_insn.a).unwrap_or_else(|| {
@@ -463,7 +478,10 @@ impl<'a> super::Lifter<'a> {
             seg_pc += advance;
         }
         let true_operand = self.pop_last_reg_assign(result_reg).unwrap_or_else(|| {
-            self.alloc_expr(HirExpr::Reg(self.reg_ref(result_reg, skip_jump_pc)), skip_jump_pc)
+            self.alloc_expr(
+                HirExpr::Reg(self.reg_ref(result_reg, skip_jump_pc)),
+                skip_jump_pc,
+            )
         });
 
         // Lift the false-value instructions (between false_val_pc and join_pc)
@@ -474,7 +492,10 @@ impl<'a> super::Lifter<'a> {
             seg_pc += advance;
         }
         let false_operand = self.pop_last_reg_assign(result_reg).unwrap_or_else(|| {
-            self.alloc_expr(HirExpr::Reg(self.reg_ref(result_reg, false_val_pc)), false_val_pc)
+            self.alloc_expr(
+                HirExpr::Reg(self.reg_ref(result_reg, false_val_pc)),
+                false_val_pc,
+            )
         });
 
         // Build: (cond1 and cond2 ...) and true_val or false_val
@@ -489,7 +510,10 @@ impl<'a> super::Lifter<'a> {
             },
             pc,
         );
-        let false_is_nil = matches!(self.hir.exprs.get(false_operand), HirExpr::Literal(LuaValue::Nil));
+        let false_is_nil = matches!(
+            self.hir.exprs.get(false_operand),
+            HirExpr::Literal(LuaValue::Nil)
+        );
         let result_expr = if false_is_nil {
             and_expr
         } else {
@@ -526,7 +550,11 @@ impl<'a> super::Lifter<'a> {
             | OpCode::JumpIfNotLt => {
                 let left = self.alloc_expr(HirExpr::Reg(self.reg_ref(insn.a, pc)), pc);
                 let right = self.alloc_expr(
-                    HirExpr::Reg(RegRef { register: insn.aux as u8, pc, has_aux: false }),
+                    HirExpr::Reg(RegRef {
+                        register: insn.aux as u8,
+                        pc,
+                        has_aux: false,
+                    }),
                     pc,
                 );
 
@@ -541,9 +569,9 @@ impl<'a> super::Lifter<'a> {
                     OpCode::JumpIfEq => BinOp::CompareEq,
                     OpCode::JumpIfLe => BinOp::CompareLe,
                     OpCode::JumpIfLt => BinOp::CompareLt,
-                    OpCode::JumpIfNotEq => BinOp::CompareEq,  // not(!=) = ==
-                    OpCode::JumpIfNotLe => BinOp::CompareLe,  // not(not(<=)) = <=
-                    OpCode::JumpIfNotLt => BinOp::CompareLt,  // not(not(<)) = <
+                    OpCode::JumpIfNotEq => BinOp::CompareEq, // not(!=) = ==
+                    OpCode::JumpIfNotLe => BinOp::CompareLe, // not(not(<=)) = <=
+                    OpCode::JumpIfNotLt => BinOp::CompareLt, // not(not(<)) = <
                     _ => unreachable!(),
                 };
 
@@ -554,7 +582,10 @@ impl<'a> super::Lifter<'a> {
                 let operand = self.alloc_expr(HirExpr::Reg(self.reg_ref(insn.a, pc)), pc);
                 if insn.op == OpCode::JumpIfNot {
                     let negated = self.alloc_expr(
-                        HirExpr::Unary { op: UnOp::Not, operand },
+                        HirExpr::Unary {
+                            op: UnOp::Not,
+                            operand,
+                        },
                         pc,
                     );
                     Some(negated)
@@ -583,7 +614,11 @@ impl<'a> super::Lifter<'a> {
 
                 let right = self.alloc_expr(HirExpr::Literal(right_val), pc);
                 // For bool regions, use the positive comparison
-                let op = if not_flag { BinOp::CompareNe } else { BinOp::CompareEq };
+                let op = if not_flag {
+                    BinOp::CompareNe
+                } else {
+                    BinOp::CompareEq
+                };
                 Some(self.alloc_expr(HirExpr::Binary { op, left, right }, pc))
             }
 

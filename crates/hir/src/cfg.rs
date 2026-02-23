@@ -41,9 +41,7 @@ pub enum Terminator {
     /// Unconditional jump.
     Jump,
     /// Conditional branch: if `condition` then `then` edge, else `else` edge.
-    Branch {
-        condition: ExprId,
-    },
+    Branch { condition: ExprId },
     /// Return from function.
     Return(Vec<ExprId>),
     /// Numeric for-loop setup (FORNPREP).
@@ -61,9 +59,7 @@ pub enum Terminator {
     },
     /// Numeric for-loop back-edge (FORNLOOP).
     /// Edges: LoopBack → body start, LoopExit → exit.
-    ForNumBack {
-        base_reg: u8,
-    },
+    ForNumBack { base_reg: u8 },
     /// Generic for-loop back-edge (FORGLOOP).
     /// The FORGPREP block jumps unconditionally to this block.
     /// Edges: LoopBack → body start, LoopExit → exit.

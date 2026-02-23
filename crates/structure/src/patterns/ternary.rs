@@ -14,7 +14,6 @@ use lantern_hir::stmt::{HirStmt, LValue};
 use lantern_hir::types::BinOp;
 use lantern_hir::var::VarId;
 
-
 /// Fold ternary patterns in a statement list.
 ///
 /// Detects two patterns:
@@ -250,7 +249,11 @@ fn is_truthy_expr(exprs: &lantern_hir::arena::ExprArena, expr_id: ExprId) -> boo
 
 /// Check if an expression tree contains a reference to a specific variable.
 /// Used to reject self-referential ternaries like `x = cond and f(x) or default`.
-fn expr_contains_var(exprs: &lantern_hir::arena::ExprArena, expr_id: ExprId, target: VarId) -> bool {
+fn expr_contains_var(
+    exprs: &lantern_hir::arena::ExprArena,
+    expr_id: ExprId,
+    target: VarId,
+) -> bool {
     match exprs.get(expr_id) {
         HirExpr::Var(v) => *v == target,
         HirExpr::Binary { left, right, .. } => {
@@ -269,7 +272,11 @@ fn expr_contains_var(exprs: &lantern_hir::arena::ExprArena, expr_id: ExprId, tar
             expr_contains_var(exprs, *object, target)
                 || args.iter().any(|a| expr_contains_var(exprs, *a, target))
         }
-        HirExpr::IfExpr { condition, then_expr, else_expr } => {
+        HirExpr::IfExpr {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
             expr_contains_var(exprs, *condition, target)
                 || expr_contains_var(exprs, *then_expr, target)
                 || expr_contains_var(exprs, *else_expr, target)

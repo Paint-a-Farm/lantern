@@ -44,7 +44,12 @@ pub(super) fn flip_elseif_guard(func: &mut HirFunc, stmt: HirStmt) -> HirStmt {
     };
 
     let Some(ref else_body_stmts) = else_body else {
-        return HirStmt::If { condition, then_body, elseif_clauses, else_body };
+        return HirStmt::If {
+            condition,
+            then_body,
+            elseif_clauses,
+            else_body,
+        };
     };
 
     if let Some(last_clause) = elseif_clauses.last_mut() {
@@ -56,7 +61,12 @@ pub(super) fn flip_elseif_guard(func: &mut HirFunc, stmt: HirStmt) -> HirStmt {
             if guard_stmts.len() == 1
                 && matches!(guard_stmts[0], HirStmt::Return(ref v) if v.is_empty())
             {
-                return HirStmt::If { condition, then_body, elseif_clauses, else_body: None };
+                return HirStmt::If {
+                    condition,
+                    then_body,
+                    elseif_clauses,
+                    else_body: None,
+                };
             }
             // Guard has content (e.g. `error(); return`) — keep as else
             return HirStmt::If {
@@ -69,10 +79,20 @@ pub(super) fn flip_elseif_guard(func: &mut HirFunc, stmt: HirStmt) -> HirStmt {
     } else if is_short_guard(&then_body) && !ends_with_exit(else_body_stmts) {
         // No elseif clauses — then-body is a guard with else having real code.
         // Already handled by the structurer; keep as-is for safety.
-        return HirStmt::If { condition, then_body, elseif_clauses, else_body };
+        return HirStmt::If {
+            condition,
+            then_body,
+            elseif_clauses,
+            else_body,
+        };
     }
 
-    HirStmt::If { condition, then_body, elseif_clauses, else_body }
+    HirStmt::If {
+        condition,
+        then_body,
+        elseif_clauses,
+        else_body,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -155,7 +175,11 @@ pub(super) fn merge_consecutive_guards(func: &mut HirFunc, stmts: Vec<HirStmt>) 
             }
 
             if j > i + 1 {
-                let exit_stmt = if first_is_continue { HirStmt::Continue } else { HirStmt::Break };
+                let exit_stmt = if first_is_continue {
+                    HirStmt::Continue
+                } else {
+                    HirStmt::Break
+                };
                 result.push(HirStmt::If {
                     condition: merged_cond,
                     then_body: vec![exit_stmt],

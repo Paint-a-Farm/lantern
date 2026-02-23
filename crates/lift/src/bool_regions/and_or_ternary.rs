@@ -29,7 +29,9 @@ use lantern_bytecode::instruction::Instruction;
 use lantern_bytecode::opcode::OpCode;
 use rustc_hash::FxHashSet;
 
-use super::utils::{has_aux_word, is_negated_conditional_jump, tail_has_side_effects, tail_loads_register};
+use super::utils::{
+    has_aux_word, is_negated_conditional_jump, tail_has_side_effects, tail_loads_register,
+};
 
 /// A compound `a and b or c` ternary expression.
 #[derive(Debug)]
@@ -98,7 +100,11 @@ fn find_and_or_ternaries(instructions: &[Instruction]) -> Vec<AndOrTernary> {
 
             // Collect additional conditional jumps targeting the same fallback_pc.
             // These form compound conditions: (a1 and a2 and ...) and b or c.
-            let scan_start = if has_aux_word(insn.op) { pc + 2 } else { pc + 1 };
+            let scan_start = if has_aux_word(insn.op) {
+                pc + 2
+            } else {
+                pc + 1
+            };
             let mut compound_jump_pcs = Vec::new();
             let mut scan = scan_start;
 
@@ -127,7 +133,12 @@ fn find_and_or_ternaries(instructions: &[Instruction]) -> Vec<AndOrTernary> {
                     // The true branch (between the leading condition and the JumpIf)
                     // must be a simple value load — no side effects allowed.
                     let true_start = if let Some(&last_cpc) = compound_jump_pcs.last() {
-                        last_cpc + if has_aux_word(instructions[last_cpc].op) { 2 } else { 1 }
+                        last_cpc
+                            + if has_aux_word(instructions[last_cpc].op) {
+                                2
+                            } else {
+                                1
+                            }
                     } else {
                         scan_start
                     };

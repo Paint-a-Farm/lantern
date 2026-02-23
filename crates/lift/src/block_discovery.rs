@@ -148,10 +148,42 @@ mod tests {
     fn test_simple_block_discovery() {
         // Simple linear function: LOADN, LOADN, ADD, RETURN
         let insns = vec![
-            Instruction { op: OpCode::LoadN, a: 0, b: 0, c: 0, d: 1, e: 0, aux: 0 },
-            Instruction { op: OpCode::LoadN, a: 1, b: 0, c: 0, d: 2, e: 0, aux: 0 },
-            Instruction { op: OpCode::Add, a: 2, b: 0, c: 1, d: 0, e: 0, aux: 0 },
-            Instruction { op: OpCode::Return, a: 2, b: 2, c: 0, d: 0, e: 0, aux: 0 },
+            Instruction {
+                op: OpCode::LoadN,
+                a: 0,
+                b: 0,
+                c: 0,
+                d: 1,
+                e: 0,
+                aux: 0,
+            },
+            Instruction {
+                op: OpCode::LoadN,
+                a: 1,
+                b: 0,
+                c: 0,
+                d: 2,
+                e: 0,
+                aux: 0,
+            },
+            Instruction {
+                op: OpCode::Add,
+                a: 2,
+                b: 0,
+                c: 1,
+                d: 0,
+                e: 0,
+                aux: 0,
+            },
+            Instruction {
+                op: OpCode::Return,
+                a: 2,
+                b: 2,
+                c: 0,
+                d: 0,
+                e: 0,
+                aux: 0,
+            },
         ];
         let starts = discover_block_starts(&insns, &FxHashSet::default(), &FxHashSet::default());
         // Only one block: PC 0
@@ -162,13 +194,61 @@ mod tests {
     fn test_jump_creates_blocks() {
         // LOADN, JUMPIF, LOADN, RETURN, LOADN, RETURN
         let insns = vec![
-            Instruction { op: OpCode::LoadN, a: 0, b: 0, c: 0, d: 1, e: 0, aux: 0 },
+            Instruction {
+                op: OpCode::LoadN,
+                a: 0,
+                b: 0,
+                c: 0,
+                d: 1,
+                e: 0,
+                aux: 0,
+            },
             // JUMPIF A=0, D=2 -> jump to PC 4
-            Instruction { op: OpCode::JumpIf, a: 0, b: 0, c: 0, d: 2, e: 0, aux: 0 },
-            Instruction { op: OpCode::LoadN, a: 1, b: 0, c: 0, d: 10, e: 0, aux: 0 },
-            Instruction { op: OpCode::Return, a: 1, b: 2, c: 0, d: 0, e: 0, aux: 0 },
-            Instruction { op: OpCode::LoadN, a: 1, b: 0, c: 0, d: 20, e: 0, aux: 0 },
-            Instruction { op: OpCode::Return, a: 1, b: 2, c: 0, d: 0, e: 0, aux: 0 },
+            Instruction {
+                op: OpCode::JumpIf,
+                a: 0,
+                b: 0,
+                c: 0,
+                d: 2,
+                e: 0,
+                aux: 0,
+            },
+            Instruction {
+                op: OpCode::LoadN,
+                a: 1,
+                b: 0,
+                c: 0,
+                d: 10,
+                e: 0,
+                aux: 0,
+            },
+            Instruction {
+                op: OpCode::Return,
+                a: 1,
+                b: 2,
+                c: 0,
+                d: 0,
+                e: 0,
+                aux: 0,
+            },
+            Instruction {
+                op: OpCode::LoadN,
+                a: 1,
+                b: 0,
+                c: 0,
+                d: 20,
+                e: 0,
+                aux: 0,
+            },
+            Instruction {
+                op: OpCode::Return,
+                a: 1,
+                b: 2,
+                c: 0,
+                d: 0,
+                e: 0,
+                aux: 0,
+            },
         ];
         let starts = discover_block_starts(&insns, &FxHashSet::default(), &FxHashSet::default());
         // Blocks: 0, 2 (fallthrough after JUMPIF), 4 (jump target)

@@ -38,7 +38,12 @@ pub(super) fn negate_or_chain(func: &mut HirFunc, condition: ExprId) -> ExprId {
 
 /// Flatten a left-associative `or` chain into individual terms.
 pub(super) fn flatten_or_chain(func: &HirFunc, expr: ExprId, out: &mut Vec<ExprId>) {
-    if let HirExpr::Binary { op: BinOp::Or, left, right } = func.exprs.get(expr) {
+    if let HirExpr::Binary {
+        op: BinOp::Or,
+        left,
+        right,
+    } = func.exprs.get(expr)
+    {
         flatten_or_chain(func, *left, out);
         out.push(*right);
     } else {

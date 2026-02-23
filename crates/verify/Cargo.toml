@@ -1,0 +1,14 @@
+[package]
+name = "lantern-verify"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "lantern-verify"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+lantern = { path = "../lantern" }
+lantern-bytecode = { path = "../bytecode" }

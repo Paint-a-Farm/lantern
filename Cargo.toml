@@ -11,6 +11,7 @@ members = [
     "crates/emit",
     "crates/lantern",
     "crates/cli",
+    "crates/verify",
 ]
 
 [workspace.dependencies]
