@@ -158,7 +158,11 @@ impl<'a> LuaEmitter<'a> {
                 let _ = write!(self.output, "function --[[proto#{}]]() end", proto_id);
             }
 
-            HirExpr::Table { array, hash } => {
+            HirExpr::Table {
+                array,
+                hash,
+                has_named_keys,
+            } => {
                 if array.is_empty() && hash.is_empty() {
                     self.output.push_str("{}");
                     return;
@@ -176,9 +180,23 @@ impl<'a> LuaEmitter<'a> {
                     if !first {
                         self.output.push_str(", ");
                     }
-                    self.output.push('[');
-                    self.emit_expr(*key);
-                    self.output.push_str("] = ");
+                    // When has_named_keys is set (DUPTABLE origin), emit bare
+                    // identifier syntax `key = val` which compiles to DUPTABLE.
+                    // Otherwise use bracket syntax `["key"] = val` (NEWTABLE).
+                    if *has_named_keys {
+                        if let Some(name) = self.try_bare_hash_key(*key) {
+                            self.output.push_str(&name);
+                            self.output.push_str(" = ");
+                        } else {
+                            self.output.push('[');
+                            self.emit_expr(*key);
+                            self.output.push_str("] = ");
+                        }
+                    } else {
+                        self.output.push('[');
+                        self.emit_expr(*key);
+                        self.output.push_str("] = ");
+                    }
                     self.emit_expr(*val);
                     first = false;
                 }
@@ -263,6 +281,19 @@ impl<'a> LuaEmitter<'a> {
             }
         }
         self.output.push('"');
+    }
+
+    /// If the key expression is a string literal that's a valid Lua identifier
+    /// (not a keyword), return it as a bare name for `key = val` syntax.
+    /// This enables the Luau compiler's DUPTABLE optimization.
+    fn try_bare_hash_key(&self, key: ExprId) -> Option<String> {
+        if let HirExpr::Literal(LuaValue::String(bytes)) = self.func.exprs.get(key) {
+            let s = std::str::from_utf8(bytes).ok()?;
+            if is_lua_identifier(s) {
+                return Some(s.to_string());
+            }
+        }
+        None
     }
 
     pub(super) fn emit_closure_body(&mut self, expr_id: ExprId) {
@@ -376,4 +407,48 @@ impl<'a> LuaEmitter<'a> {
             self.emit_expr(expr_id);
         }
     }
+}
+
+/// Check if a string is a valid Lua/Luau identifier (not a keyword).
+fn is_lua_identifier(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    let mut chars = s.chars();
+    let first = chars.next().unwrap();
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return false;
+    }
+    if !chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return false;
+    }
+    !is_lua_keyword(s)
+}
+
+fn is_lua_keyword(s: &str) -> bool {
+    matches!(
+        s,
+        "and"
+            | "break"
+            | "do"
+            | "else"
+            | "elseif"
+            | "end"
+            | "false"
+            | "for"
+            | "function"
+            | "if"
+            | "in"
+            | "local"
+            | "nil"
+            | "not"
+            | "or"
+            | "repeat"
+            | "return"
+            | "then"
+            | "true"
+            | "until"
+            | "while"
+            | "continue"
+    )
 }

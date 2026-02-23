@@ -240,7 +240,7 @@ fn collect_from_expr(func: &HirFunc, expr_id: ExprId, out: &mut Vec<RegAccess>) 
                 collect_from_expr(func, *a, out);
             }
         }
-        HirExpr::Table { array, hash } => {
+        HirExpr::Table { array, hash, .. } => {
             for a in array {
                 collect_from_expr(func, *a, out);
             }

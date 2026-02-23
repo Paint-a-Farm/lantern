@@ -231,7 +231,7 @@ fn find_var_uses_in_expr(
                 find_var_uses_in_expr(exprs, *a, target, out);
             }
         }
-        HirExpr::Table { array, hash } => {
+        HirExpr::Table { array, hash, .. } => {
             for a in array {
                 find_var_uses_in_expr(exprs, *a, target, out);
             }

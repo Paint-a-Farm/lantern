@@ -255,6 +255,7 @@ impl<'a> super::Lifter<'a> {
                     HirExpr::Table {
                         array: Vec::new(),
                         hash: Vec::new(),
+                        has_named_keys: false,
                     },
                     pc,
                 );
@@ -264,12 +265,15 @@ impl<'a> super::Lifter<'a> {
 
             OpCode::DupTable => {
                 let reg = self.reg_ref(insn.a, pc);
-                // DUPTABLE creates a table from a template constant.
-                // For now, emit an empty table — the template is a hash layout hint.
+                // DUPTABLE creates a table from a template constant with
+                // pre-allocated hash keys.  Mark has_named_keys so the emitter
+                // uses bare identifier syntax (`key = val`) which compiles back
+                // to DUPTABLE.
                 let expr = self.alloc_expr(
                     HirExpr::Table {
                         array: Vec::new(),
                         hash: Vec::new(),
+                        has_named_keys: true,
                     },
                     pc,
                 );

@@ -691,7 +691,7 @@ fn collect_var_refs(
                 collect_var_refs(func, *a, block, result, visited);
             }
         }
-        HirExpr::Table { array, hash } => {
+        HirExpr::Table { array, hash, .. } => {
             let array: Vec<_> = array.clone();
             let hash: Vec<_> = hash.clone();
             for a in &array {
@@ -802,7 +802,7 @@ pub(crate) fn expr_has_side_effects(func: &HirFunc, expr_id: ExprId) -> bool {
         }
         HirExpr::Unary { operand, .. } => expr_has_side_effects(func, *operand),
         HirExpr::Concat(operands) => operands.iter().any(|o| expr_has_side_effects(func, *o)),
-        HirExpr::Table { array, hash } => {
+        HirExpr::Table { array, hash, .. } => {
             array.iter().any(|a| expr_has_side_effects(func, *a))
                 || hash.iter().any(|(k, v)| {
                     expr_has_side_effects(func, *k) || expr_has_side_effects(func, *v)
@@ -911,7 +911,7 @@ fn collect_side_effect_calls(func: &HirFunc, expr_id: ExprId, out: &mut Vec<Expr
         HirExpr::Call { .. } | HirExpr::MethodCall { .. } => {
             out.push(expr_id);
         }
-        HirExpr::Table { array, hash } => {
+        HirExpr::Table { array, hash, .. } => {
             let array = array.clone();
             let hash = hash.clone();
             for item in &array {

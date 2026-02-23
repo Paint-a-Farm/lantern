@@ -283,7 +283,7 @@ fn expr_contains_var(
         }
         HirExpr::Concat(parts) => parts.iter().any(|p| expr_contains_var(exprs, *p, target)),
         HirExpr::Select { source, .. } => expr_contains_var(exprs, *source, target),
-        HirExpr::Table { array, hash } => {
+        HirExpr::Table { array, hash, .. } => {
             array.iter().any(|a| expr_contains_var(exprs, *a, target))
                 || hash.iter().any(|(k, v)| {
                     expr_contains_var(exprs, *k, target) || expr_contains_var(exprs, *v, target)

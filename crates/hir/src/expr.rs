@@ -89,9 +89,13 @@ pub enum HirExpr {
 
     /// Table constructor: `{ ... }`
     /// Array items have key=None, hash items have key=Some(expr).
+    /// `has_named_keys` is true when the original bytecode used DUPTABLE,
+    /// meaning hash keys should be emitted as bare identifiers (`key = val`)
+    /// rather than bracket syntax (`["key"] = val`).
     Table {
         array: Vec<ExprId>,
         hash: Vec<(ExprId, ExprId)>,
+        has_named_keys: bool,
     },
 
     /// String concatenation: `a .. b .. c`

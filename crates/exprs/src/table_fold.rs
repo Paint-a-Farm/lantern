@@ -191,8 +191,12 @@ fn apply_table_fold(
     writes: &[TableWrite],
 ) {
     // Only fold if the target expression is actually a Table
-    let (mut array, mut hash) = match exprs.get(table_expr_id).clone() {
-        HirExpr::Table { array, hash } => (array, hash),
+    let (mut array, mut hash, named) = match exprs.get(table_expr_id).clone() {
+        HirExpr::Table {
+            array,
+            hash,
+            has_named_keys,
+        } => (array, hash, has_named_keys),
         _ => return,
     };
 
@@ -225,7 +229,14 @@ fn apply_table_fold(
     }
 
     // Replace the table expression with the folded version
-    exprs.replace(table_expr_id, HirExpr::Table { array, hash });
+    exprs.replace(
+        table_expr_id,
+        HirExpr::Table {
+            array,
+            hash,
+            has_named_keys: named,
+        },
+    );
 }
 
 /// Check if a table write's key or value expressions reference the given variable.
@@ -267,7 +278,7 @@ fn expr_references_var(
             expr_references_var(exprs, *object, var_id)
                 || args.iter().any(|a| expr_references_var(exprs, *a, var_id))
         }
-        HirExpr::Table { array, hash } => {
+        HirExpr::Table { array, hash, .. } => {
             array.iter().any(|a| expr_references_var(exprs, *a, var_id))
                 || hash.iter().any(|(k, v)| {
                     expr_references_var(exprs, *k, var_id) || expr_references_var(exprs, *v, var_id)
