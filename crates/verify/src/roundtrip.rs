@@ -235,6 +235,7 @@ fn verify_case_roundtrip(
 fn compile_luau_binary(lua_path: &Path) -> Result<Vec<u8>> {
     let output = Command::new("luau-compile")
         .arg("--binary")
+        .arg("-O2")
         .arg("-g2")
         .arg(lua_path)
         .output()
