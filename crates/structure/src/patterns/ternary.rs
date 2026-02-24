@@ -101,12 +101,6 @@ fn try_fold_assign_then_if(
         _ => return None,
     };
 
-    // Safety check: true_val must be truthy (not nil or false literal)
-    // to preserve `cond and a or b` semantics
-    if !is_truthy_expr(&func.exprs, true_val) {
-        return None;
-    }
-
     // Safety check: condition and true_val must not reference the target variable
     // (self-referential patterns like `x = cond(x) and a or b` or `x = cond and f(x) or b` are wrong)
     if expr_contains_var(&func.exprs, condition, var_id)
@@ -115,27 +109,54 @@ fn try_fold_assign_then_if(
         return None;
     }
 
-    // Build: cond and true_val or false_val
-    let and_expr = func.exprs.alloc(HirExpr::Binary {
-        op: BinOp::And,
-        left: condition,
-        right: true_val,
-    });
-    let or_expr = func.exprs.alloc(HirExpr::Binary {
-        op: BinOp::Or,
-        left: and_expr,
-        right: false_val,
-    });
+    // Determine the expression form based on false_val and true_val truthiness.
+    //
+    // When false_val is literally `false`, we can emit just `cond and true_val`
+    // because when cond is falsy, `cond and true_val` returns the falsy cond itself.
+    // This handles patterns like `return X ~= nil and f() and g()` where the
+    // compiler generated `R = false; if cond then R = and_chain end; return R`.
+    //
+    // NOTE: We only accept `false` here, NOT `nil`. Nil-initialized patterns like
+    // `local x = nil; if a ~= nil then x = a.field end` are guard conditions that
+    // compile to JumpXEqKNil, which produces different bytecode than and-chains.
+    //
+    // When false_val is something else, we need the full `cond and true_val or false_val`
+    // ternary form, which requires true_val to be guaranteed truthy to preserve
+    // `and`/`or` semantics.
+    let result_expr = if is_false_literal(&func.exprs, false_val) {
+        // Simple and-chain: cond and true_val
+        func.exprs.alloc(HirExpr::Binary {
+            op: BinOp::And,
+            left: condition,
+            right: true_val,
+        })
+    } else {
+        // Full ternary: cond and true_val or false_val
+        // Safety check: true_val must be truthy to preserve semantics
+        if !is_truthy_expr(&func.exprs, true_val) {
+            return None;
+        }
+        let and_expr = func.exprs.alloc(HirExpr::Binary {
+            op: BinOp::And,
+            left: condition,
+            right: true_val,
+        });
+        func.exprs.alloc(HirExpr::Binary {
+            op: BinOp::Or,
+            left: and_expr,
+            right: false_val,
+        })
+    };
 
     if is_local_decl {
         Some(HirStmt::LocalDecl {
             var: var_id,
-            init: Some(or_expr),
+            init: Some(result_expr),
         })
     } else {
         Some(HirStmt::Assign {
             target: LValue::Local(var_id),
-            value: or_expr,
+            value: result_expr,
         })
     }
 }
@@ -243,6 +264,26 @@ fn is_truthy_expr(exprs: &lantern_hir::arena::ExprArena, expr_id: ExprId) -> boo
         }
         // `not x` returns a boolean, which could be false — NOT truthy
         // Variable reads, function calls, field accesses — unknown truthiness
+        _ => false,
+    }
+}
+
+/// Check if an expression is a `false` or `nil` literal.
+///
+/// When the false-branch of a conditional assignment is `false` or `nil`,
+/// the pattern `x = false; if cond then x = expr end` can be folded to
+/// just `x = cond and expr` (without the `or false_val` suffix), because
+/// `cond and expr` already returns the falsy cond when cond is false.
+///
+/// NOTE: Only `false` is accepted, NOT `nil`. Nil-initialized patterns are
+/// guard conditions (`local x = nil; if a ~= nil then x = a.field end`) that
+/// compile to JumpXEqKNil, producing different bytecode than and-chains.
+fn is_false_literal(exprs: &lantern_hir::arena::ExprArena, expr_id: ExprId) -> bool {
+    match exprs.get(expr_id) {
+        HirExpr::Literal(val) => {
+            use lantern_hir::types::LuaValue;
+            matches!(val, LuaValue::Boolean(false))
+        }
         _ => false,
     }
 }

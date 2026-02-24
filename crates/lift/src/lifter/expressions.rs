@@ -180,9 +180,14 @@ impl<'a> super::Lifter<'a> {
         for (idx, stmt) in stmts.iter().enumerate().rev() {
             if let HirStmt::RegAssign { target, value: v } = stmt {
                 if target.register == table_reg {
-                    if matches!(self.hir.exprs.get(*v), HirExpr::Table { .. }) {
-                        table_expr_id = Some(*v);
-                        table_stmt_idx = idx;
+                    if let HirExpr::Table { has_named_keys, .. } = self.hir.exprs.get(*v) {
+                        // Only fold into DupTable tables (has_named_keys=true).
+                        // NewTable tables should be left for the post-varrecovery
+                        // table_fold pass which produces proper Var references.
+                        if *has_named_keys {
+                            table_expr_id = Some(*v);
+                            table_stmt_idx = idx;
+                        }
                     }
                     break;
                 }
@@ -199,9 +204,15 @@ impl<'a> super::Lifter<'a> {
             };
             if let Some(vreg) = value_reg {
                 for stmt in &stmts[table_stmt_idx + 1..] {
-                    if let HirStmt::RegAssign { target, .. } = stmt {
+                    if let HirStmt::RegAssign { target, value: v } = stmt {
                         if target.register == vreg {
-                            return false; // Value register was redefined after table
+                            // The value register was assigned after the table.
+                            // Allow folding if the value is a simple literal/constant
+                            // (e.g. LoadB true) since it doesn't depend on ordering.
+                            if !matches!(self.hir.exprs.get(*v), HirExpr::Literal(_)) {
+                                return false;
+                            }
+                            break;
                         }
                     }
                 }

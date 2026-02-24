@@ -24,6 +24,10 @@ pub(super) fn ends_with_exit(stmts: &[HirStmt]) -> bool {
 ///
 /// Only strips a bare return when the branch has other statements — a branch
 /// whose sole purpose is `return` (early exit guard) must keep it.
+///
+/// When any sibling branch ends with `return <value>`, bare returns in other
+/// branches are kept — removing them changes bytecode because the compiler
+/// must add a Jump + implicit trailing Return instead.
 pub(super) fn strip_trailing_returns(stmts: &mut Vec<HirStmt>) {
     // Strip a trailing bare return from the statement list itself
     if matches!(stmts.last(), Some(HirStmt::Return(v)) if v.is_empty()) {
@@ -38,13 +42,40 @@ pub(super) fn strip_trailing_returns(stmts: &mut Vec<HirStmt>) {
         ..
     }) = stmts.last_mut()
     {
-        strip_trailing_return_if_not_sole(then_body);
-        for clause in elseif_clauses.iter_mut() {
-            strip_trailing_return_if_not_sole(&mut clause.body);
+        // Check if any branch ends with a non-bare return (return <value>).
+        // If so, don't strip bare returns from other branches — the compiler
+        // generates different bytecode (Jump + trailing Return vs inline Return).
+        let has_valued_return = has_non_bare_return(then_body)
+            || elseif_clauses.iter().any(|c| has_non_bare_return(&c.body))
+            || else_body.as_ref().is_some_and(|b| has_non_bare_return(b));
+
+        if !has_valued_return {
+            strip_trailing_return_if_not_sole(then_body);
+            for clause in elseif_clauses.iter_mut() {
+                strip_trailing_return_if_not_sole(&mut clause.body);
+            }
+            if let Some(else_body) = else_body {
+                strip_trailing_return_if_not_sole(else_body);
+            }
         }
-        if let Some(else_body) = else_body {
-            strip_trailing_return_if_not_sole(else_body);
+    }
+}
+
+/// Check if a statement list ends with `return <values>` (non-empty return).
+fn has_non_bare_return(stmts: &[HirStmt]) -> bool {
+    match stmts.last() {
+        Some(HirStmt::Return(v)) => !v.is_empty(),
+        Some(HirStmt::If {
+            then_body,
+            elseif_clauses,
+            else_body,
+            ..
+        }) => {
+            has_non_bare_return(then_body)
+                || elseif_clauses.iter().any(|c| has_non_bare_return(&c.body))
+                || else_body.as_ref().is_some_and(|b| has_non_bare_return(b))
         }
+        _ => false,
     }
 }
 

@@ -1,7 +1,7 @@
 use petgraph::algo::dominators::simple_fast;
 use petgraph::stable_graph::NodeIndex;
 use petgraph::Direction;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use lantern_bytecode::scope_tree::ScopeTree;
 use lantern_hir::expr::{CaptureSource, HirExpr};
@@ -253,6 +253,89 @@ pub fn recover_variables(func: &mut HirFunc, scopes: &ScopeTree, num_params: u8)
                 .map(|(_, vid)| *vid);
             if let Some(vid) = var_id {
                 use_var.insert(*use_ref, vid);
+            }
+        }
+    }
+
+    // Phase 4b: Unify branch defs with dominator defs.
+    //
+    // Pattern: `R2 = false; if cond then R2 = <expr> end; return R2`
+    // After Phase 4, the Return resolves R2 to Block 0's VarId (the LOADB def),
+    // while Block 1's def gets a separate orphaned VarId that's never used.
+    // This prevents the ternary folder from recognizing the pattern.
+    //
+    // Fix: for each register with multiple unscopped defs, if one def is in
+    // a dominator block (already used by Phase 4 resolution) and another is
+    // in a non-dominator branch block, unify the branch def with the dominator
+    // def's VarId. This makes the assignment visible as a conditional update
+    // to the same variable.
+    if let Some(ref dom_tree) = doms {
+        // Collect all unscopped defs grouped by register
+        let mut unscopped_defs_by_reg: FxHashMap<u8, Vec<(RegRef, VarId)>> = FxHashMap::default();
+        for access in &accesses {
+            if access.is_def {
+                if let Some(&vid) = def_var.get(&access.reg) {
+                    let info = func.vars.get(vid);
+                    if info.name.is_none() {
+                        unscopped_defs_by_reg
+                            .entry(access.reg.register)
+                            .or_default()
+                            .push((access.reg, vid));
+                    }
+                }
+            }
+        }
+
+        // For each register with multiple unscopped defs, look for the pattern
+        for (_register, defs) in &unscopped_defs_by_reg {
+            if defs.len() < 2 {
+                continue;
+            }
+
+            // Find which VarIds are actually used (have at least one use_var entry)
+            let used_vids: FxHashSet<VarId> = use_var.values().copied().collect();
+
+            // Find the "dominator def" — the one that's actually referenced by uses
+            let dom_defs: Vec<_> = defs.iter().filter(|(_, vid)| used_vids.contains(vid)).collect();
+            let orphan_defs: Vec<_> = defs.iter().filter(|(_, vid)| !used_vids.contains(vid)).collect();
+
+            if dom_defs.len() != 1 || orphan_defs.is_empty() {
+                continue;
+            }
+
+            let (dom_ref, dom_vid) = dom_defs[0];
+            let dom_block = find_node_containing_pc(func, dom_ref.pc);
+
+            for (orphan_ref, orphan_vid) in &orphan_defs {
+                if *orphan_vid == *dom_vid {
+                    continue;
+                }
+                let orphan_block = find_node_containing_pc(func, orphan_ref.pc);
+
+                // The orphan must be in a DIFFERENT block from the dom def.
+                // Same-block defs are sequential register reuses, not branch alternatives.
+                // The orphan block must also be strictly dominated by the dom block
+                // (not equal to it).
+                let is_branch_def = match (dom_block, orphan_block) {
+                    (Some(d), Some(o)) if d != o => {
+                        let mut current = Some(o);
+                        let mut found = false;
+                        while let Some(node) = current {
+                            if node == d {
+                                found = true;
+                                break;
+                            }
+                            current = dom_tree.immediate_dominator(node);
+                        }
+                        found
+                    }
+                    _ => false,
+                };
+
+                if is_branch_def {
+                    // Rebind the orphan def to the dominator's VarId
+                    def_var.insert(*orphan_ref, *dom_vid);
+                }
             }
         }
     }

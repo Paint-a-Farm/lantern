@@ -78,6 +78,18 @@ fn fold_in_stmts(stmts: &mut Vec<HirStmt>, exprs: &mut lantern_hir::arena::ExprA
             }
 
             if !field_writes.is_empty() {
+                // Count total uses of this variable in the arena.
+                // field_writes each consume one use (t.field = val reads t).
+                // If remaining uses > 1 after the writes, folding into a
+                // constructor would cause the compiler to allocate a temp
+                // register + Move for multi-use variables (extra opcode).
+                let total_uses = count_var_uses_in_arena(var_id, exprs);
+                let remaining = total_uses.saturating_sub(field_writes.len());
+                if remaining > 1 {
+                    i += 1;
+                    continue;
+                }
+
                 // Collect stale table-reference ExprIds from the about-to-be-removed
                 // statements. After fold, these Var(v) expressions would still sit in
                 // the arena and fool is_var_used_as_table_target into thinking the var
@@ -202,7 +214,6 @@ fn apply_table_fold(
 
     // Track the next expected array index (1-based, after existing array entries)
     let mut next_array_idx = (array.len() as i64) + 1;
-
     for write in writes {
         match write {
             TableWrite::NumericIndex { key, value } => {
@@ -252,6 +263,23 @@ fn table_write_references_var(
         }
         TableWrite::Field { value, .. } => expr_references_var(exprs, *value, var_id),
     }
+}
+
+/// Count how many times a variable appears as `HirExpr::Var(var_id)` in the arena.
+fn count_var_uses_in_arena(
+    var_id: VarId,
+    exprs: &lantern_hir::arena::ExprArena,
+) -> usize {
+    let mut count = 0;
+    for i in 0..exprs.len() {
+        let expr_id = ExprId(i as u32);
+        if let HirExpr::Var(v) = exprs.get(expr_id) {
+            if *v == var_id {
+                count += 1;
+            }
+        }
+    }
+    count
 }
 
 /// Check if an expression transitively references a given variable.
