@@ -390,34 +390,36 @@ pub(super) fn structure_branch(
                     });
                     return Some(else_n);
                 }
-                // else branch breaks → original was `if cond then <body> end`
-                // with an implicit exit when false. Preserve polarity by
-                // structuring the then-body inline instead of negating.
+                // else branch breaks → original was `if NOT(cond) then break end; <body>`
+                // The lifter already inverted the comparison (JumpIfLt → CompareGe),
+                // so we negate back to recover the original guard condition and
+                // emit the guard+break form to preserve opcode polarity.
                 if Some(else_target) == lctx.exit && !visited.contains(&else_target) {
-                    let then_stmts =
-                        structure_region(func, then_n, stop, loop_ctx, visited);
+                    let guard_cond = negate_condition(func, condition);
                     result.push(HirStmt::If {
-                        condition,
-                        then_body: then_stmts,
+                        condition: guard_cond,
+                        then_body: vec![HirStmt::Break],
                         elseif_clauses: Vec::new(),
                         else_body: None,
                     });
-                    // After the if, the loop body is done — exit naturally
+                    let then_stmts =
+                        structure_region(func, then_n, stop, loop_ctx, visited);
+                    result.extend(then_stmts);
                     return stop;
                 }
-                // else branch continues → original was `if cond then <body> end`
-                // with an implicit continue when false. Preserve polarity by
-                // structuring the then-body inline instead of negating.
+                // else branch continues → original was `if NOT(cond) then continue end; <body>`
+                // Same as break case: negate back to recover original guard condition.
                 if else_target == lctx.header {
-                    let then_stmts =
-                        structure_region(func, then_n, stop, loop_ctx, visited);
+                    let guard_cond = negate_condition(func, condition);
                     result.push(HirStmt::If {
-                        condition,
-                        then_body: then_stmts,
+                        condition: guard_cond,
+                        then_body: vec![HirStmt::Continue],
                         elseif_clauses: Vec::new(),
                         else_body: None,
                     });
-                    // After the if, continue to next iteration naturally
+                    let then_stmts =
+                        structure_region(func, then_n, stop, loop_ctx, visited);
+                    result.extend(then_stmts);
                     return stop;
                 }
             }

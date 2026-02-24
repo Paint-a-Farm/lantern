@@ -74,10 +74,10 @@ pub fn run(args: RoundtripArgs) -> Result<()> {
         ensure_command_available("luau-compile")?;
     }
 
-    let mut input_files = collect_l64_files(&args.inputs)?;
+    let mut input_files = collect_input_files(&args.inputs)?;
     input_files.sort();
     if input_files.is_empty() {
-        bail!("no .l64 files found in input paths");
+        bail!("no .l64/.luau files found in input paths");
     }
 
     let (output_dir, is_temp) = prepare_output_dir(args.out_dir.as_deref())?;
@@ -86,7 +86,10 @@ pub fn run(args: RoundtripArgs) -> Result<()> {
         output_dir.display()
     );
 
-    let generated = decompile_inputs(&input_files, &output_dir, args.encode_key)?;
+    // Compile any .luau inputs to .l64 bytecode first.
+    let l64_files = prepare_l64_inputs(&input_files, &output_dir)?;
+
+    let generated = decompile_inputs(&l64_files, &output_dir, args.encode_key)?;
     let generated_paths: Vec<PathBuf> = generated.iter().map(|c| c.output_path.clone()).collect();
 
     let analyze_report = analyze::run_luau_analyze(&generated_paths)?;
@@ -232,6 +235,7 @@ fn verify_case_roundtrip(
 fn compile_luau_binary(lua_path: &Path) -> Result<Vec<u8>> {
     let output = Command::new("luau-compile")
         .arg("--binary")
+        .arg("-g2")
         .arg(lua_path)
         .output()
         .with_context(|| format!("failed to run luau-compile for {}", lua_path.display()))?;
@@ -340,16 +344,19 @@ fn ensure_command_available(name: &str) -> Result<()> {
     }
 }
 
-fn collect_l64_files(inputs: &[PathBuf]) -> Result<Vec<PathBuf>> {
+fn collect_input_files(inputs: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     for input in inputs {
         if input.is_dir() {
-            collect_l64_from_dir(input, &mut files)?;
-        } else if input.extension().is_some_and(|ext| ext == "l64") {
+            collect_from_dir(input, &mut files)?;
+        } else if input
+            .extension()
+            .is_some_and(|ext| ext == "l64" || ext == "luau")
+        {
             files.push(input.clone());
         } else {
             bail!(
-                "input is neither a directory nor a .l64 file: {}",
+                "input is neither a directory nor a .l64/.luau file: {}",
                 input.display()
             );
         }
@@ -357,7 +364,7 @@ fn collect_l64_files(inputs: &[PathBuf]) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn collect_l64_from_dir(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+fn collect_from_dir(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     let entries =
         fs::read_dir(dir).with_context(|| format!("failed to list directory {}", dir.display()))?;
 
@@ -365,10 +372,34 @@ fn collect_l64_from_dir(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
         let entry = entry.with_context(|| format!("failed to read entry in {}", dir.display()))?;
         let path = entry.path();
         if path.is_dir() {
-            collect_l64_from_dir(&path, out)?;
-        } else if path.extension().is_some_and(|ext| ext == "l64") {
+            collect_from_dir(&path, out)?;
+        } else if path
+            .extension()
+            .is_some_and(|ext| ext == "l64" || ext == "luau")
+        {
             out.push(path);
         }
     }
     Ok(())
+}
+
+/// Compile any `.luau` inputs to `.l64` bytecode via luau-compile, returning
+/// the final list of `.l64` paths (originals kept as-is, `.luau` replaced
+/// with compiled temp files).
+fn prepare_l64_inputs(inputs: &[PathBuf], tmp_dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::with_capacity(inputs.len());
+    for path in inputs {
+        if path.extension().is_some_and(|ext| ext == "luau") {
+            let bytecode = compile_luau_binary(path)?;
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("case");
+            let l64_path = tmp_dir.join(format!("{}.l64", stem));
+            fs::write(&l64_path, bytecode).with_context(|| {
+                format!("failed to write compiled bytecode for {}", path.display())
+            })?;
+            out.push(l64_path);
+        } else {
+            out.push(path.clone());
+        }
+    }
+    Ok(out)
 }

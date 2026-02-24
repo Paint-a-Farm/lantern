@@ -427,26 +427,10 @@ pub(super) fn merge_consecutive_guards(func: &mut HirFunc, stmts: Vec<HirStmt>) 
 ///
 /// The guard does not need to be the first statement — leading non-guard
 /// statements are preserved before the wrapping if block.
-pub(super) fn flip_guard_to_wrapper(func: &mut HirFunc, stmts: Vec<HirStmt>) -> Vec<HirStmt> {
-    if stmts.len() < 2 {
-        return stmts;
-    }
-
-    // Only flip `continue` guards — they always reduce to the original pattern.
-    // Bare `return` guards are kept as-is because the original source used the
-    // guard style, and flipping would reduce the RETURN opcode count.
-    if let Some((&cond, true)) = is_early_exit_guard(&stmts[0]) {
-        let inv_cond = negate_or_chain(func, cond);
-        let rest: Vec<HirStmt> = stmts[1..].to_vec();
-
-        return vec![HirStmt::If {
-            condition: inv_cond,
-            then_body: rest,
-            elseif_clauses: Vec::new(),
-            else_body: None,
-        }];
-    }
-
+pub(super) fn flip_guard_to_wrapper(_func: &mut HirFunc, stmts: Vec<HirStmt>) -> Vec<HirStmt> {
+    // Previously flipped `if cond then continue end; body` → `if not cond then body end`.
+    // Disabled: these forms produce different opcodes (JumpIfLt vs JumpIfNotLe),
+    // so flipping breaks roundtrip fidelity. Guard+continue is preserved as-is.
     stmts
 }
 
