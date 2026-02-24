@@ -348,27 +348,32 @@ impl<'a> super::Lifter<'a> {
                     pc,
                 );
 
-                let result_reg = self.reg_ref(call_insn.a, next_pc);
-                self.emit_assign_reg(result_reg, call_expr);
+                if call_insn.c == 1 {
+                    // Void call (C=1 means 0 results): emit as statement, not assignment
+                    self.emit_stmt(HirStmt::ExprStmt(call_expr));
+                } else {
+                    let result_reg = self.reg_ref(call_insn.a, next_pc);
+                    self.emit_assign_reg(result_reg, call_expr);
 
-                // Multi-return: assign Select for each additional result register
-                if nresults > 1 {
-                    for i in 1..nresults {
-                        let select_expr = self.alloc_expr(
-                            HirExpr::Select {
-                                source: call_expr,
-                                index: i as u8,
-                            },
-                            next_pc,
-                        );
-                        let reg = self.reg_ref(call_insn.a + i as u8, next_pc);
-                        self.emit_assign_reg(reg, select_expr);
+                    // Multi-return: assign Select for each additional result register
+                    if nresults > 1 {
+                        for i in 1..nresults {
+                            let select_expr = self.alloc_expr(
+                                HirExpr::Select {
+                                    source: call_expr,
+                                    index: i as u8,
+                                },
+                                next_pc,
+                            );
+                            let reg = self.reg_ref(call_insn.a + i as u8, next_pc);
+                            self.emit_assign_reg(reg, select_expr);
+                        }
                     }
-                }
 
-                // If C=0, this call produces MULTRET results
-                if call_insn.c == 0 {
-                    self.top = Some((call_expr, call_insn.a));
+                    // If C=0, this call produces MULTRET results
+                    if call_insn.c == 0 {
+                        self.top = Some((call_expr, call_insn.a));
+                    }
                 }
 
                 3 // NAMECALL + AUX + CALL
@@ -402,27 +407,32 @@ impl<'a> super::Lifter<'a> {
                     pc,
                 );
 
-                let result_reg = self.reg_ref(insn.a, pc);
-                self.emit_assign_reg(result_reg, call_expr);
+                if insn.c == 1 {
+                    // Void call (C=1 means 0 results): emit as statement, not assignment
+                    self.emit_stmt(HirStmt::ExprStmt(call_expr));
+                } else {
+                    let result_reg = self.reg_ref(insn.a, pc);
+                    self.emit_assign_reg(result_reg, call_expr);
 
-                // Multi-return: assign Select for each additional result register
-                if nresults > 1 {
-                    for i in 1..nresults {
-                        let select_expr = self.alloc_expr(
-                            HirExpr::Select {
-                                source: call_expr,
-                                index: i as u8,
-                            },
-                            pc,
-                        );
-                        let reg = self.reg_ref(insn.a + i as u8, pc);
-                        self.emit_assign_reg(reg, select_expr);
+                    // Multi-return: assign Select for each additional result register
+                    if nresults > 1 {
+                        for i in 1..nresults {
+                            let select_expr = self.alloc_expr(
+                                HirExpr::Select {
+                                    source: call_expr,
+                                    index: i as u8,
+                                },
+                                pc,
+                            );
+                            let reg = self.reg_ref(insn.a + i as u8, pc);
+                            self.emit_assign_reg(reg, select_expr);
+                        }
                     }
-                }
 
-                // If C=0, this call produces MULTRET results
-                if insn.c == 0 {
-                    self.top = Some((call_expr, insn.a));
+                    // If C=0, this call produces MULTRET results
+                    if insn.c == 0 {
+                        self.top = Some((call_expr, insn.a));
+                    }
                 }
                 1
             }

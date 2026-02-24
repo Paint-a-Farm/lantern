@@ -24,7 +24,9 @@ use lantern_bytecode::instruction::Instruction;
 use lantern_bytecode::opcode::OpCode;
 use rustc_hash::FxHashSet;
 
-use super::utils::{conditional_jump_target, has_aux_word, tail_loads_register};
+use super::utils::{
+    conditional_jump_target, has_aux_word, tail_loads_register, writes_multiple_registers,
+};
 
 /// A truthiness-based or/and chain in the instruction stream.
 #[derive(Debug)]
@@ -181,6 +183,12 @@ fn find_truthy_chains(instructions: &[Instruction]) -> Vec<TruthyChain> {
                     join_pc
                 };
                 if !tail_loads_register(instructions, seg_start, seg_end, reg) {
+                    all_segments_valid = false;
+                    break;
+                }
+                // Reject segments that write to registers beyond the chain
+                // register — these are if-bodies, not value expressions.
+                if writes_multiple_registers(instructions, seg_start, seg_end, reg) {
                     all_segments_valid = false;
                     break;
                 }

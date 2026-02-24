@@ -148,12 +148,16 @@ fn try_or_chain(
                 }
                 chain_node = then_n;
             } else {
-                // Neither edge is a Branch or body — dead end.
+                // Neither edge is a Branch or body — this block is
+                // the continuation AFTER the or-chain, not part of it.
+                join_node = Some(current);
                 break 'walk;
             }
         }
 
-        // Didn't find body_node from this chain — check single block case.
+        // Didn't find body_node from this chain — current block is the
+        // continuation after the or-chain.
+        join_node = Some(current);
         break;
     }
 

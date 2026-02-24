@@ -531,30 +531,38 @@ fn bind_scope_initializers(
                         use_var,
                         accesses,
                     ) {
-                        for access in reg_accesses.iter() {
-                            if access.is_def && access.is_closure_def && access.reg.pc < scope_start
-                            {
-                                if !def_var_has_named(def_var, func, &access.reg) {
-                                    let var_id = get_or_create_scope_var(
-                                        func,
-                                        register,
-                                        scope_name,
-                                        scope_start,
-                                        scope_end,
-                                        Some(access.reg.pc), // Closure def is the declaration
-                                        def_var,
-                                        use_var,
-                                        accesses,
-                                    );
-                                    let info = func.vars.get_mut(var_id);
-                                    if !info.def_pcs.contains(&access.reg.pc) {
-                                        info.def_pcs.push(access.reg.pc);
-                                    }
-                                    def_var.insert(access.reg, var_id);
-                                    break;
+                        // Find the CLOSEST closure def before scope_start (highest PC).
+                    // When a register is reused for multiple closures (e.g. R16
+                    // first holds an anonymous callback, then the named function),
+                    // we must pick the one nearest to the scope start.
+                    let mut best_closure: Option<&RegAccess> = None;
+                    for access in reg_accesses.iter() {
+                        if access.is_def && access.is_closure_def && access.reg.pc < scope_start {
+                            if !def_var_has_named(def_var, func, &access.reg) {
+                                if best_closure.map_or(true, |b| access.reg.pc > b.reg.pc) {
+                                    best_closure = Some(access);
                                 }
                             }
                         }
+                    }
+                    if let Some(access) = best_closure {
+                        let var_id = get_or_create_scope_var(
+                            func,
+                            register,
+                            scope_name,
+                            scope_start,
+                            scope_end,
+                            Some(access.reg.pc), // Closure def is the declaration
+                            def_var,
+                            use_var,
+                            accesses,
+                        );
+                        let info = func.vars.get_mut(var_id);
+                        if !info.def_pcs.contains(&access.reg.pc) {
+                            info.def_pcs.push(access.reg.pc);
+                        }
+                        def_var.insert(access.reg, var_id);
+                    }
                     }
                 }
             }

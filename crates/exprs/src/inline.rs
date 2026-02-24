@@ -3,7 +3,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use lantern_hir::arena::ExprId;
 use lantern_hir::cfg::Terminator;
-use lantern_hir::expr::HirExpr;
+use lantern_hir::expr::{CaptureSource, HirExpr};
 use lantern_hir::func::HirFunc;
 use lantern_hir::stmt::{HirStmt, LValue};
 use lantern_hir::var::VarId;
@@ -151,8 +151,11 @@ fn find_candidates_in_stmts(
             let uses = use_counts.get(var_id).copied().unwrap_or(0);
 
             // Named variables are generally kept (not inlined), except:
-            // - Closures with exactly 1 use can be inlined at the call site
-            if !(has_name && !(is_closure && uses == 1)) {
+            // - Closures with exactly 1 use can be inlined at the call site,
+            //   but only if that use is an actual Var expression (not a capture).
+            let closure_inlinable = is_closure && uses == 1
+                && has_var_expr_use(func, *var_id);
+            if !(has_name && !closure_inlinable) {
                 if uses == 0 {
                     if !expr_has_side_effects(func, *value) {
                         dead_stores.insert(*var_id);
@@ -742,8 +745,18 @@ fn count_uses(func: &HirFunc) -> FxHashMap<VarId, usize> {
     // Count uses in expressions
     for i in 0..func.exprs.len() {
         let expr_id = ExprId(i as u32);
-        if let HirExpr::Var(var_id) = func.exprs.get(expr_id) {
-            *counts.entry(*var_id).or_insert(0) += 1;
+        match func.exprs.get(expr_id) {
+            HirExpr::Var(var_id) => {
+                *counts.entry(*var_id).or_insert(0) += 1;
+            }
+            HirExpr::Closure { captures, .. } => {
+                for cap in captures {
+                    if let CaptureSource::Var(var_id) = &cap.source {
+                        *counts.entry(*var_id).or_insert(0) += 1;
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -796,7 +809,7 @@ fn count_uses_in_stmt(stmt: &HirStmt, func: &HirFunc, counts: &mut FxHashMap<Var
 /// Check if an expression has observable side effects (calls, etc.).
 pub(crate) fn expr_has_side_effects(func: &HirFunc, expr_id: ExprId) -> bool {
     match func.exprs.get(expr_id) {
-        HirExpr::Call { .. } | HirExpr::MethodCall { .. } => true,
+        HirExpr::Call { .. } | HirExpr::MethodCall { .. } | HirExpr::Closure { .. } => true,
         HirExpr::Binary { left, right, .. } => {
             expr_has_side_effects(func, *left) || expr_has_side_effects(func, *right)
         }
@@ -824,6 +837,22 @@ pub(crate) fn expr_has_side_effects(func: &HirFunc, expr_id: ExprId) -> bool {
         HirExpr::Select { source, .. } => expr_has_side_effects(func, *source),
         _ => false,
     }
+}
+
+/// Check if a variable has at least one `HirExpr::Var(var_id)` use in the
+/// expression arena. This distinguishes vars used in expressions (substitutable
+/// by the inline pass) from vars used only as `CaptureSource::Var` (not
+/// substitutable). Used to prevent inlining closures that are only captured.
+fn has_var_expr_use(func: &HirFunc, var_id: VarId) -> bool {
+    for i in 0..func.exprs.len() {
+        let expr_id = ExprId(i as u32);
+        if let HirExpr::Var(v) = func.exprs.get(expr_id) {
+            if *v == var_id {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Check if a variable is used as the table target of a FieldAccess/IndexAccess
