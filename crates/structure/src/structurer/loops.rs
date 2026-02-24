@@ -7,6 +7,7 @@ use lantern_hir::cfg::{EdgeKind, Terminator};
 use lantern_hir::expr::HirExpr;
 use lantern_hir::func::HirFunc;
 use lantern_hir::stmt::{HirStmt, LValue};
+use lantern_hir::types::LuaValue;
 use lantern_hir::var::VarId;
 
 use super::cfg_helpers::{branch_successors, negate_condition};
@@ -68,11 +69,39 @@ pub(super) fn try_structure_while(
     let body_stmts = structure_region(func, body_start, Some(node), Some(&loop_ctx), visited);
 
     let mut all_stmts = Vec::new();
-    all_stmts.extend(header_stmts);
-    all_stmts.push(HirStmt::While {
-        condition: loop_condition,
-        body: body_stmts,
-    });
+
+    if header_stmts.is_empty() {
+        // Simple while-loop: no header computations, just `while cond do ... end`
+        all_stmts.push(HirStmt::While {
+            condition: loop_condition,
+            body: body_stmts,
+        });
+    } else {
+        // The header block has statements that compute the loop condition
+        // (e.g. `key = string.format(...)`). These re-execute every iteration
+        // via the back-edge, so they belong INSIDE the loop body.
+        //
+        // Emit: `while true do <header_stmts>; if not <cond> then break end; <body> end`
+        let true_expr = func
+            .exprs
+            .alloc(HirExpr::Literal(LuaValue::Boolean(true)));
+        let neg_cond = negate_condition(func, loop_condition);
+
+        let mut loop_body = Vec::new();
+        loop_body.extend(header_stmts);
+        loop_body.push(HirStmt::If {
+            condition: neg_cond,
+            then_body: vec![HirStmt::Break],
+            elseif_clauses: Vec::new(),
+            else_body: None,
+        });
+        loop_body.extend(body_stmts);
+
+        all_stmts.push(HirStmt::While {
+            condition: true_expr,
+            body: loop_body,
+        });
+    }
 
     Some(LoopResult {
         stmts: all_stmts,
