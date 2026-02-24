@@ -162,6 +162,18 @@ fn try_or_chain(
         return None;
     }
 
+    // If ALL clauses reach the body through their else-edge (body_on_else=true
+    // on the final link of every clause), this is actually an AND guard chain
+    // (each block skips to the failure path when its condition is false).
+    // Treating it as an or-chain would negate every condition, flipping
+    // JumpIf↔JumpIfNot. Reject and let the normal structurer handle it.
+    let all_body_on_else = clause_data
+        .iter()
+        .all(|links| links.last().is_some_and(|&(_, body_on_else)| body_on_else));
+    if all_body_on_else {
+        return None;
+    }
+
     // Validate: body_node must only be reached by or-chain clause blocks.
     // If the body_node has predecessors from outside the or-chain (e.g. the
     // continuation path also reaches it), it's a shared exit — not an
