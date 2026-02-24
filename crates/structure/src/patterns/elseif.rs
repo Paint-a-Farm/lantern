@@ -58,8 +58,12 @@ fn normalize_inverted_elseif_inner(func: &mut HirFunc, stmt: HirStmt, in_chain: 
         };
     }
 
-    // Check if then_body is a single If (chain continues)
-    let is_chain = then_body.len() == 1 && matches!(&then_body[0], HirStmt::If { .. });
+    // Check if then_body is a single If *with an else_body* (chain continues).
+    // An inverted elseif chain has `if A then if B then ... else handler end else handler end`.
+    // If the inner If has no else_body, it's a genuine `if A then <nested check> else <alt> end`,
+    // not an inverted chain — leave it alone to preserve branch polarity.
+    let is_chain = then_body.len() == 1
+        && matches!(&then_body[0], HirStmt::If { else_body: Some(_), elseif_clauses, .. } if elseif_clauses.is_empty());
     let else_body = else_body.unwrap();
 
     if !is_chain {
