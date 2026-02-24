@@ -205,7 +205,7 @@ fn try_or_chain(
         let mut and_parts: Vec<ExprId> = Vec::new();
         for (i, &(block, body_on_else)) in links.iter().enumerate() {
             all_blocks.push(block);
-            let Terminator::Branch { condition } = func.cfg[block].terminator else {
+            let Terminator::Branch { condition, .. } = func.cfg[block].terminator else {
                 return None;
             };
 
@@ -348,6 +348,7 @@ pub(super) fn structure_branch(
     func: &mut HirFunc,
     _node: NodeIndex,
     condition: ExprId,
+    negated: bool,
     stop: Option<NodeIndex>,
     loop_ctx: Option<&LoopCtx>,
     visited: &mut FxHashSet<NodeIndex>,
@@ -390,36 +391,60 @@ pub(super) fn structure_branch(
                     });
                     return Some(else_n);
                 }
-                // else branch breaks → original was `if NOT(cond) then break end; <body>`
-                // The lifter already inverted the comparison (JumpIfLt → CompareGe),
-                // so we negate back to recover the original guard condition and
-                // emit the guard+break form to preserve opcode polarity.
+                // else branch breaks/continues: use `negated` flag from the
+                // original opcode to decide between guard and wrapping forms.
+                //   negated=true  (JumpIfNot*) → wrapping: `if cond then <body> end`
+                //   negated=false (JumpIf*)    → guard: `if NOT(cond) then break/continue end; <body>`
                 if Some(else_target) == lctx.exit && !visited.contains(&else_target) {
-                    let guard_cond = negate_condition(func, condition);
-                    result.push(HirStmt::If {
-                        condition: guard_cond,
-                        then_body: vec![HirStmt::Break],
-                        elseif_clauses: Vec::new(),
-                        else_body: None,
-                    });
-                    let then_stmts =
-                        structure_region(func, then_n, stop, loop_ctx, visited);
-                    result.extend(then_stmts);
+                    if negated {
+                        // Wrapping form: `if cond then <body> end`
+                        let then_stmts =
+                            structure_region(func, then_n, stop, loop_ctx, visited);
+                        result.push(HirStmt::If {
+                            condition,
+                            then_body: then_stmts,
+                            elseif_clauses: Vec::new(),
+                            else_body: None,
+                        });
+                    } else {
+                        // Guard form: `if NOT(cond) then break end; <body>`
+                        let guard_cond = negate_condition(func, condition);
+                        result.push(HirStmt::If {
+                            condition: guard_cond,
+                            then_body: vec![HirStmt::Break],
+                            elseif_clauses: Vec::new(),
+                            else_body: None,
+                        });
+                        let then_stmts =
+                            structure_region(func, then_n, stop, loop_ctx, visited);
+                        result.extend(then_stmts);
+                    }
                     return stop;
                 }
-                // else branch continues → original was `if NOT(cond) then continue end; <body>`
-                // Same as break case: negate back to recover original guard condition.
                 if else_target == lctx.header {
-                    let guard_cond = negate_condition(func, condition);
-                    result.push(HirStmt::If {
-                        condition: guard_cond,
-                        then_body: vec![HirStmt::Continue],
-                        elseif_clauses: Vec::new(),
-                        else_body: None,
-                    });
-                    let then_stmts =
-                        structure_region(func, then_n, stop, loop_ctx, visited);
-                    result.extend(then_stmts);
+                    if negated {
+                        // Wrapping form: `if cond then <body> end`
+                        let then_stmts =
+                            structure_region(func, then_n, stop, loop_ctx, visited);
+                        result.push(HirStmt::If {
+                            condition,
+                            then_body: then_stmts,
+                            elseif_clauses: Vec::new(),
+                            else_body: None,
+                        });
+                    } else {
+                        // Guard form: `if NOT(cond) then continue end; <body>`
+                        let guard_cond = negate_condition(func, condition);
+                        result.push(HirStmt::If {
+                            condition: guard_cond,
+                            then_body: vec![HirStmt::Continue],
+                            elseif_clauses: Vec::new(),
+                            else_body: None,
+                        });
+                        let then_stmts =
+                            structure_region(func, then_n, stop, loop_ctx, visited);
+                        result.extend(then_stmts);
+                    }
                     return stop;
                 }
             }

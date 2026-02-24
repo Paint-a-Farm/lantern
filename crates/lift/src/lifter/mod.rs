@@ -313,9 +313,9 @@ impl<'a> Lifter<'a> {
         }
     }
 
-    pub(super) fn emit_branch(&mut self, condition: ExprId, then_pc: usize, else_pc: usize) {
+    pub(super) fn emit_branch(&mut self, condition: ExprId, then_pc: usize, else_pc: usize, negated: bool) {
         self.hir.cfg[self.current_block].terminator =
-            lantern_hir::cfg::Terminator::Branch { condition };
+            lantern_hir::cfg::Terminator::Branch { condition, negated };
 
         if let Some(&then_node) = self.block_map.get(&then_pc) {
             self.hir

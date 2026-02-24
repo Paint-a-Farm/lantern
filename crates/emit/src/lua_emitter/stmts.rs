@@ -580,7 +580,7 @@ impl<'a> LuaEmitter<'a> {
                 }
             }
 
-            Terminator::Branch { condition } => {
+            Terminator::Branch { condition, .. } => {
                 // Find then/else edges
                 let mut then_target = None;
                 let mut else_target = None;

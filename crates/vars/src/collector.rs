@@ -176,7 +176,7 @@ fn collect_from_stmt(func: &HirFunc, stmt: &HirStmt, out: &mut Vec<RegAccess>) {
 
 fn collect_from_terminator(func: &HirFunc, term: &Terminator, out: &mut Vec<RegAccess>) {
     match term {
-        Terminator::Branch { condition } => {
+        Terminator::Branch { condition, .. } => {
             collect_from_expr(func, *condition, out);
         }
         Terminator::Return(values) => {

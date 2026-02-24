@@ -28,7 +28,7 @@ pub(super) fn try_structure_while(
     visited: &mut FxHashSet<NodeIndex>,
 ) -> Option<LoopResult> {
     let condition = match &func.cfg[node].terminator {
-        Terminator::Branch { condition } => *condition,
+        Terminator::Branch { condition, .. } => *condition,
         _ => return None,
     };
 

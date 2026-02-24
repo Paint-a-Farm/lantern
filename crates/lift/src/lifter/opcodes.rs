@@ -480,7 +480,7 @@ impl<'a> super::Lifter<'a> {
                     pc,
                 );
                 let target = ((pc + 1) as i64 + insn.d as i64) as usize;
-                self.emit_branch(cond, pc + 1, target);
+                self.emit_branch(cond, pc + 1, target, false);
                 1
             }
 
@@ -488,7 +488,7 @@ impl<'a> super::Lifter<'a> {
                 // JumpIfNot = jump when falsy → original source had `if cond then`
                 let cond = self.alloc_expr(HirExpr::Reg(self.reg_ref(insn.a, pc)), pc);
                 let target = ((pc + 1) as i64 + insn.d as i64) as usize;
-                self.emit_branch(cond, pc + 1, target);
+                self.emit_branch(cond, pc + 1, target, true);
                 1
             }
 
@@ -526,9 +526,10 @@ impl<'a> super::Lifter<'a> {
                     _ => unreachable!(),
                 };
 
+                let negated = matches!(insn.op, OpCode::JumpIfNotEq | OpCode::JumpIfNotLe | OpCode::JumpIfNotLt);
                 let cond = self.alloc_expr(HirExpr::Binary { op, left, right }, pc);
                 let target = ((pc + 1) as i64 + insn.d as i64) as usize;
-                self.emit_branch(cond, pc + 2, target);
+                self.emit_branch(cond, pc + 2, target, negated);
                 2 // AUX
             }
 
@@ -570,7 +571,9 @@ impl<'a> super::Lifter<'a> {
 
                 let cond = self.alloc_expr(HirExpr::Binary { op, left, right }, pc);
                 let target = ((pc + 1) as i64 + insn.d as i64) as usize;
-                self.emit_branch(cond, pc + 2, target);
+                // not_flag=1 means JumpIfNotEq → negated (wrapping pattern)
+                // not_flag=0 means JumpIfEq → non-negated (guard pattern)
+                self.emit_branch(cond, pc + 2, target, not_flag);
                 2 // AUX
             }
 

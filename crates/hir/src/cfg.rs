@@ -41,7 +41,12 @@ pub enum Terminator {
     /// Unconditional jump.
     Jump,
     /// Conditional branch: if `condition` then `then` edge, else `else` edge.
-    Branch { condition: ExprId },
+    ///
+    /// `negated` records whether the original bytecode used a negated jump
+    /// (JumpIfNot, JumpIfNotLt, JumpIfNotLe, JumpIfNotEq). When true the
+    /// original source had `if cond then <body> end` (wrapping); when false
+    /// the source had `if NOT(cond) then break/continue end; <body>` (guard).
+    Branch { condition: ExprId, negated: bool },
     /// Return from function.
     Return(Vec<ExprId>),
     /// Numeric for-loop setup (FORNPREP).

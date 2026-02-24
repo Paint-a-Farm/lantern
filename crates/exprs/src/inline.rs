@@ -522,7 +522,7 @@ fn build_use_blocks(func: &HirFunc) -> FxHashMap<VarId, FxHashSet<NodeIndex>> {
 
         // Also collect from the terminator
         match &block.terminator {
-            Terminator::Branch { condition } => expr_ids.push(*condition),
+            Terminator::Branch { condition, .. } => expr_ids.push(*condition),
             Terminator::Return(values) => expr_ids.extend(values.iter().copied()),
             Terminator::ForNumPrep {
                 start, limit, step, ..

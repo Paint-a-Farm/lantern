@@ -110,10 +110,11 @@ pub(crate) fn structure_region(
                 current = succ;
             }
 
-            Terminator::Branch { condition } => {
+            Terminator::Branch { condition, negated } => {
                 let condition = *condition;
+                let negated = *negated;
                 current =
-                    structure_branch(func, node, condition, stop, loop_ctx, visited, &mut result);
+                    structure_branch(func, node, condition, negated, stop, loop_ctx, visited, &mut result);
             }
 
             Terminator::ForNumPrep {
