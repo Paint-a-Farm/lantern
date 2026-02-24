@@ -440,17 +440,20 @@ pub(super) fn structure_branch(
                 }
             }
             if join.is_none() && else_returns && !then_returns {
-                // else always returns → `if not cond then <return> end; <continue from then>`
+                // else always returns → structure then-body inline, emit
+                // `if cond then <then_body> else <return> end` preserving
+                // the original branch polarity (avoids JumpIf↔JumpIfNot swaps).
                 let else_stmts = collect_return_stmts(func, else_n, stop, loop_ctx, visited);
                 if !else_stmts.is_empty() {
-                    let inv_cond = negate_condition(func, condition);
+                    let then_stmts =
+                        structure_region(func, then_n, stop, loop_ctx, visited);
                     result.push(HirStmt::If {
-                        condition: inv_cond,
-                        then_body: else_stmts,
+                        condition,
+                        then_body: then_stmts,
                         elseif_clauses: Vec::new(),
-                        else_body: None,
+                        else_body: Some(else_stmts),
                     });
-                    return Some(then_n);
+                    return effective_join.or(stop);
                 }
             }
 
