@@ -292,6 +292,9 @@ fn try_or_chain(
 ///
 /// Walks the first AND sub-chain following then-edges through Branch blocks
 /// until finding a non-Branch successor that has content (the body).
+///
+/// When both successors are Branch blocks, also checks if the else-edge target
+/// is reachable from the then-edge's chain (convergence target for the OR).
 fn find_or_chain_body(func: &HirFunc, start: NodeIndex) -> Option<NodeIndex> {
     let mut node = start;
     for _ in 0..10 {
@@ -331,10 +334,70 @@ fn find_or_chain_body(func: &HirFunc, start: NodeIndex) -> Option<NodeIndex> {
         if !else_is_branch {
             return Some(else_n);
         }
-        // Both Branch — follow then-edge (AND chain continuation).
+        // Both Branch — check if one side is a convergence target reached
+        // directly by the other side's chain. This handles `A or B` where
+        // the body block itself starts with a Branch (if-then inside).
+        //
+        // To avoid false positives (e.g. picking an intermediate clause as
+        // the body), require that the candidate body is directly targeted
+        // by at least one edge in the other chain, AND has fewer outgoing
+        // chain-internal edges (i.e., it's an endpoint, not a relay).
+        let else_in_degree = count_incoming_from_branches(func, else_n);
+        let then_in_degree = count_incoming_from_branches(func, then_n);
+        if else_in_degree > then_in_degree && branch_chain_reaches(func, then_n, else_n, 5) {
+            return Some(else_n);
+        }
+        if then_in_degree > else_in_degree && branch_chain_reaches(func, else_n, then_n, 5) {
+            return Some(then_n);
+        }
+        // Neither side converges — follow then-edge (AND chain continuation).
         node = then_n;
     }
     None
+}
+
+/// Count how many incoming edges come from Branch blocks (potential or-chain members).
+fn count_incoming_from_branches(func: &HirFunc, node: NodeIndex) -> usize {
+    func.cfg
+        .edges_directed(node, Direction::Incoming)
+        .filter(|e| is_branch_block(func, e.source()))
+        .count()
+}
+
+/// Check if a chain of Branch blocks starting at `start` has any edge that
+/// targets `target` within `max_depth` hops.
+fn branch_chain_reaches(
+    func: &HirFunc,
+    start: NodeIndex,
+    target: NodeIndex,
+    max_depth: usize,
+) -> bool {
+    let mut node = start;
+    for _ in 0..max_depth {
+        if !is_branch_block(func, node) {
+            return false;
+        }
+        let (then_n, else_n) = branch_successors(&func.cfg, node);
+        match (then_n, else_n) {
+            (Some(t), Some(e)) => {
+                if t == target || e == target {
+                    return true;
+                }
+                // Follow the branch chain — pick the successor that's a Branch.
+                let t_is_branch = is_branch_block(func, t);
+                let e_is_branch = is_branch_block(func, e);
+                if t_is_branch {
+                    node = t;
+                } else if e_is_branch {
+                    node = e;
+                } else {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    false
 }
 
 /// Check if a block has meaningful content (statements or non-trivial terminator).
@@ -544,11 +607,15 @@ pub(super) fn structure_branch(
             let (elseif_clauses, final_else) = extract_elseif_chain(else_stmts);
 
             if elseif_clauses.is_empty() && final_else.is_empty() {
+                // Check if the then-branch ends with a Jump(0) — the
+                // compiler's artifact for an empty `else` body.  When
+                // present, emit `else end` to match the original source.
+                let has_empty_else = has_empty_else_annotation(func, then_n, effective_join);
                 result.push(HirStmt::If {
                     condition,
                     then_body: then_stmts,
                     elseif_clauses: Vec::new(),
-                    else_body: None,
+                    else_body: if has_empty_else { Some(vec![]) } else { None },
                 });
             } else if elseif_clauses.is_empty() && !final_else.is_empty() {
                 if then_stmts.is_empty() {
@@ -718,6 +785,46 @@ fn collect_return_stmts(
         }
     }
     Vec::new()
+}
+
+/// Check if the then-region of a branch ends with a `Jump +0` annotation,
+/// indicating the original source had an empty `else` body.  Walks forward
+/// from `start` following unconditional Jump edges until reaching `join`.
+fn has_empty_else_annotation(
+    func: &HirFunc,
+    start: NodeIndex,
+    join: Option<NodeIndex>,
+) -> bool {
+    let mut node = start;
+    let mut depth = 0;
+    loop {
+        if depth > 20 {
+            return false;
+        }
+        let block = &func.cfg[node];
+        if block.has_empty_else_jump {
+            // Verify this jump targets the join point (the else exit).
+            if let Some(join_n) = join {
+                for e in func.cfg.edges(node) {
+                    if e.target() == join_n {
+                        return true;
+                    }
+                }
+            }
+        }
+        // Follow unconditional jumps deeper into the then-region.
+        if matches!(block.terminator, Terminator::Jump) {
+            if let Some(succ) = cfg_helpers::single_successor(&func.cfg, node) {
+                if Some(succ) == join {
+                    return false; // Reached join without finding annotation
+                }
+                node = succ;
+                depth += 1;
+                continue;
+            }
+        }
+        return false;
+    }
 }
 
 pub(super) fn extract_elseif_chain(

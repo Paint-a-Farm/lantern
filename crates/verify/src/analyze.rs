@@ -28,10 +28,13 @@ pub fn run_luau_analyze(paths: &[PathBuf]) -> Result<AnalyzeReport> {
         }
 
         let output = cmd.output().context("failed to execute luau-analyze")?;
-        if !output.status.success() {
+        // luau-analyze returns non-zero when diagnostics are found — that's
+        // expected, not an error.  Only bail if we got a signal kill (no exit
+        // code at all), which indicates an OOM or crash.
+        if output.status.code().is_none() {
             bail!(
-                "luau-analyze failed with status {}",
-                output.status.code().unwrap_or(-1)
+                "luau-analyze killed by signal for chunk starting at {:?}",
+                chunk.first().map(|p| p.display().to_string())
             );
         }
 

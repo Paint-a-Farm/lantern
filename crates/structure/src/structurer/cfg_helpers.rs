@@ -92,6 +92,25 @@ pub(super) fn find_join_point(
         }
     }
 
+    // Shared sunk-return: both branches Jump to the same bare Return block,
+    // but neither branch target IS that block.  Example:
+    //   Branch → then=B3, else=B4
+    //   B3: [assign] Jump → B5
+    //   B4: [assign] Jump → B5
+    //   B5: Return(expr)   (bare, no stmts)
+    // B5 is the real join point — the return belongs after `end`.
+    if common.is_empty() {
+        for &candidate in then_reachable.intersection(&else_reachable) {
+            if candidate != then_node
+                && candidate != else_node
+                && !visited.contains(&candidate)
+                && is_sunk_return(&func.cfg, candidate)
+            {
+                common.push(candidate);
+            }
+        }
+    }
+
     if common.is_empty() {
         return None;
     }

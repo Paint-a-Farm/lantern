@@ -19,6 +19,10 @@ pub struct HirBlock {
     pub for_gen_iterators: Option<Vec<ExprId>>,
     /// FORGPREP variant (which opcode was used). Propagated to FORGLOOP's terminator.
     pub for_gen_variant: Option<ForGenVariant>,
+    /// True when this block ends with `Jump +0` (offset 0) — the compiler's
+    /// artifact for an empty `else` body.  The structurer uses this to emit
+    /// `else end` even though the else body is empty.
+    pub has_empty_else_jump: bool,
 }
 
 impl HirBlock {
@@ -29,6 +33,7 @@ impl HirBlock {
             pc_range: (0, 0),
             for_gen_iterators: None,
             for_gen_variant: None,
+            has_empty_else_jump: false,
         }
     }
 }

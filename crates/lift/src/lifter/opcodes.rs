@@ -464,6 +464,10 @@ impl<'a> super::Lifter<'a> {
                 let target = ((pc + 1) as i64 + offset as i64) as usize;
                 self.add_jump_edge(target);
                 self.hir.cfg[self.current_block].terminator = lantern_hir::cfg::Terminator::Jump;
+                // Jump +0 (offset 0) is the compiler's artifact for an empty else body.
+                if offset == 0 {
+                    self.hir.cfg[self.current_block].has_empty_else_jump = true;
+                }
                 if insn.op == OpCode::JumpX {
                     1
                 } else {
