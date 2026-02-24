@@ -378,27 +378,35 @@ pub(super) fn structure_branch(
                     });
                     return Some(else_n);
                 }
-                // if not cond then break end (else branch breaks)
+                // else branch breaks → original was `if cond then <body> end`
+                // with an implicit exit when false. Preserve polarity by
+                // structuring the then-body inline instead of negating.
                 if Some(else_target) == lctx.exit && !visited.contains(&else_target) {
-                    let inv_cond = negate_condition(func, condition);
+                    let then_stmts =
+                        structure_region(func, then_n, stop, loop_ctx, visited);
                     result.push(HirStmt::If {
-                        condition: inv_cond,
-                        then_body: vec![HirStmt::Break],
+                        condition,
+                        then_body: then_stmts,
                         elseif_clauses: Vec::new(),
                         else_body: None,
                     });
-                    return Some(then_n);
+                    // After the if, the loop body is done — exit naturally
+                    return stop;
                 }
-                // if not cond then continue end (else branch continues)
+                // else branch continues → original was `if cond then <body> end`
+                // with an implicit continue when false. Preserve polarity by
+                // structuring the then-body inline instead of negating.
                 if else_target == lctx.header {
-                    let inv_cond = negate_condition(func, condition);
+                    let then_stmts =
+                        structure_region(func, then_n, stop, loop_ctx, visited);
                     result.push(HirStmt::If {
-                        condition: inv_cond,
-                        then_body: vec![HirStmt::Continue],
+                        condition,
+                        then_body: then_stmts,
                         elseif_clauses: Vec::new(),
                         else_body: None,
                     });
-                    return Some(then_n);
+                    // After the if, continue to next iteration naturally
+                    return stop;
                 }
             }
 
