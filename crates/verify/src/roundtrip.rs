@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -7,12 +8,20 @@ use anyhow::{bail, Context, Result};
 use clap::{Args, ValueEnum};
 
 use crate::analyze;
-use crate::normalize::{self, CompareMode};
+use crate::normalize::{self, ChunkCompareReport, CompareMode, FunctionResult};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum CompareModeArg {
     Loose,
     Strict,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum OutputFormat {
+    /// Default human-readable output.
+    Text,
+    /// LCOV tracefile with per-function pass/fail as line coverage.
+    Lcov,
 }
 
 #[derive(Debug, Args)]
@@ -53,12 +62,26 @@ pub struct RoundtripArgs {
     /// Print all failures (not just the first 10).
     #[arg(long)]
     pub list_failing: bool,
+
+    /// Output format: text (default) or lcov.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub format: OutputFormat,
 }
 
 #[derive(Debug)]
 struct GeneratedCase {
     source_path: PathBuf,
     output_path: PathBuf,
+}
+
+/// Per-file roundtrip result with per-function detail.
+#[derive(Debug)]
+struct FileRoundtripResult {
+    source_path: PathBuf,
+    /// `None` if decompile or recompile failed entirely.
+    report: Option<ChunkCompareReport>,
+    /// Top-level error (compile failure, decompile failure, etc.)
+    error: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -81,10 +104,15 @@ pub fn run(args: RoundtripArgs) -> Result<()> {
     }
 
     let (output_dir, is_temp) = prepare_output_dir(args.out_dir.as_deref())?;
-    println!(
-        "lantern-verify: writing decompiled files to {}",
-        output_dir.display()
-    );
+
+    let is_lcov = matches!(args.format, OutputFormat::Lcov);
+
+    if !is_lcov {
+        println!(
+            "lantern-verify: writing decompiled files to {}",
+            output_dir.display()
+        );
+    }
 
     // Compile any .luau inputs to .l64 bytecode first.
     let l64_files = prepare_l64_inputs(&input_files, &output_dir)?;
@@ -93,13 +121,16 @@ pub fn run(args: RoundtripArgs) -> Result<()> {
     let generated_paths: Vec<PathBuf> = generated.iter().map(|c| c.output_path.clone()).collect();
 
     let analyze_report = analyze::run_luau_analyze(&generated_paths)?;
-    let analyze_total = analyze_report.total_diagnostics();
-    println!(
-        "luau-analyze: {} diagnostics ({} syntax errors)",
-        analyze_total, analyze_report.syntax_errors
-    );
-    for line in analyze_report.samples.iter().take(10) {
-        println!("  {}", line);
+
+    if !is_lcov {
+        let analyze_total = analyze_report.total_diagnostics();
+        println!(
+            "luau-analyze: {} diagnostics ({} syntax errors)",
+            analyze_total, analyze_report.syntax_errors
+        );
+        for line in analyze_report.samples.iter().take(10) {
+            println!("  {}", line);
+        }
     }
 
     let mut hard_failures: Vec<String> = Vec::new();
@@ -109,31 +140,57 @@ pub fn run(args: RoundtripArgs) -> Result<()> {
             analyze_report.syntax_errors
         ));
     }
-    if args.fail_on_analyze_diagnostics && analyze_total > 0 {
+    if args.fail_on_analyze_diagnostics && analyze_report.total_diagnostics() > 0 {
         hard_failures.push(format!(
             "luau-analyze reported {} diagnostics and --fail-on-analyze-diagnostics is set",
-            analyze_total
+            analyze_report.total_diagnostics()
         ));
     }
 
-    let compile_report = if args.skip_roundtrip_compile {
-        None
-    } else {
-        Some(run_compile_roundtrip(
+    if args.skip_roundtrip_compile {
+        if hard_failures.is_empty() {
+            if !is_lcov {
+                println!("verification passed: {} files checked", input_files.len());
+            }
+            if is_temp && !args.keep_output {
+                fs::remove_dir_all(&output_dir).with_context(|| {
+                    format!("failed to delete temp output {}", output_dir.display())
+                })?;
+            }
+            return Ok(());
+        }
+        bail!(hard_failures.join("; "));
+    }
+
+    if is_lcov {
+        // Per-function LCOV output
+        let file_results = run_compile_roundtrip_detailed(
             &generated,
             args.encode_key,
             to_compare_mode(args.compare_mode),
-        ))
-    };
+        );
+        let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+        write_lcov(&mut out, &file_results)?;
+        out.flush()?;
+    } else {
+        // Classic text output
+        let report = run_compile_roundtrip(
+            &generated,
+            args.encode_key,
+            to_compare_mode(args.compare_mode),
+        );
 
-    if let Some(report) = &compile_report {
         println!(
             "compile roundtrip: {} checked, {} passed, {} mismatches",
             report.checked,
             report.passed.len(),
             report.failures.len()
         );
-        let limit = if args.list_failing { report.failures.len() } else { 10 };
+        let limit = if args.list_failing {
+            report.failures.len()
+        } else {
+            10
+        };
         for line in report.failures.iter().take(limit) {
             println!("  {}", line);
         }
@@ -148,25 +205,32 @@ pub fn run(args: RoundtripArgs) -> Result<()> {
                 report.failures.len()
             ));
         }
-    }
 
-    if hard_failures.is_empty() {
-        println!("verification passed: {} files checked", input_files.len());
-        if is_temp && !args.keep_output {
-            fs::remove_dir_all(&output_dir).with_context(|| {
-                format!("failed to delete temp output {}", output_dir.display())
-            })?;
+        if hard_failures.is_empty() {
+            println!("verification passed: {} files checked", input_files.len());
+            if is_temp && !args.keep_output {
+                fs::remove_dir_all(&output_dir).with_context(|| {
+                    format!("failed to delete temp output {}", output_dir.display())
+                })?;
+            }
+            return Ok(());
         }
-        return Ok(());
+
+        if is_temp {
+            println!(
+                "verification failed; generated output kept at {}",
+                output_dir.display()
+            );
+        }
+        bail!(hard_failures.join("; "))
     }
 
-    if is_temp {
-        println!(
-            "verification failed; generated output kept at {}",
-            output_dir.display()
-        );
+    if is_temp && !args.keep_output {
+        fs::remove_dir_all(&output_dir).with_context(|| {
+            format!("failed to delete temp output {}", output_dir.display())
+        })?;
     }
-    bail!(hard_failures.join("; "))
+    Ok(())
 }
 
 fn to_compare_mode(mode: CompareModeArg) -> CompareMode {
@@ -176,6 +240,7 @@ fn to_compare_mode(mode: CompareModeArg) -> CompareMode {
     }
 }
 
+/// Classic file-level pass/fail roundtrip (used for text output).
 fn run_compile_roundtrip(
     cases: &[GeneratedCase],
     source_encode_key: u8,
@@ -198,6 +263,18 @@ fn run_compile_roundtrip(
     }
 
     report
+}
+
+/// Per-function roundtrip (used for LCOV output).
+fn run_compile_roundtrip_detailed(
+    cases: &[GeneratedCase],
+    source_encode_key: u8,
+    compare_mode: CompareMode,
+) -> Vec<FileRoundtripResult> {
+    cases
+        .iter()
+        .map(|case| verify_case_detailed(case, source_encode_key, compare_mode))
+        .collect()
 }
 
 fn verify_case_roundtrip(
@@ -230,6 +307,154 @@ fn verify_case_roundtrip(
     )?;
 
     Ok(())
+}
+
+fn verify_case_detailed(
+    case: &GeneratedCase,
+    source_encode_key: u8,
+    compare_mode: CompareMode,
+) -> FileRoundtripResult {
+    let source_bytes = match fs::read(&case.source_path) {
+        Ok(b) => b,
+        Err(e) => {
+            return FileRoundtripResult {
+                source_path: case.source_path.clone(),
+                report: None,
+                error: Some(format!("read error: {e}")),
+            }
+        }
+    };
+
+    let source_chunk = match lantern_bytecode::deserialize(&source_bytes, source_encode_key) {
+        Ok(c) => c,
+        Err(e) => {
+            return FileRoundtripResult {
+                source_path: case.source_path.clone(),
+                report: None,
+                error: Some(format!("parse error: {e}")),
+            }
+        }
+    };
+
+    let compiled_output = match compile_luau_binary(&case.output_path) {
+        Ok(b) => b,
+        Err(e) => {
+            // Compile failed — mark all functions as failed.
+            let functions: Vec<FunctionResult> = source_chunk
+                .functions
+                .iter()
+                .enumerate()
+                .map(|(idx, _)| {
+                    let name = normalize::func_debug_name_pub(&source_chunk, idx);
+                    FunctionResult {
+                        index: idx,
+                        name,
+                        is_main: idx == source_chunk.main,
+                        error: Some(format!("compile error: {e}")),
+                    }
+                })
+                .collect();
+            return FileRoundtripResult {
+                source_path: case.source_path.clone(),
+                report: Some(ChunkCompareReport {
+                    functions,
+                    top_level_error: None,
+                }),
+                error: None,
+            };
+        }
+    };
+
+    let recompiled_chunk = match deserialize_compiled_chunk(&compiled_output) {
+        Ok(c) => c,
+        Err(e) => {
+            return FileRoundtripResult {
+                source_path: case.source_path.clone(),
+                report: None,
+                error: Some(format!("recompile parse error: {e}")),
+            }
+        }
+    };
+
+    let report = normalize::chunks_compare(&source_chunk, &recompiled_chunk, compare_mode);
+    FileRoundtripResult {
+        source_path: case.source_path.clone(),
+        report: Some(report),
+        error: None,
+    }
+}
+
+/// Write LCOV tracefile to the given writer.
+///
+/// Each .l64 source file becomes an LCOV record (SF:).
+/// Each function in the file gets an FN/FNDA entry.
+/// Pass = FNDA:1 (hit), fail = FNDA:0 (miss).
+fn write_lcov<W: Write>(out: &mut W, results: &[FileRoundtripResult]) -> Result<()> {
+    for file_result in results {
+        let sf = file_result.source_path.display();
+        writeln!(out, "SF:{sf}")?;
+
+        if let Some(ref report) = file_result.report {
+            if let Some(ref top_err) = report.top_level_error {
+                // Top-level error (e.g. function count mismatch) —
+                // emit a single failing pseudo-function.
+                writeln!(out, "FN:0,(top-level)")?;
+                writeln!(out, "FNDA:0,(top-level)")?;
+                writeln!(out, "BRDA:0,0,0,{top_err}")?;
+                writeln!(out, "FNF:1")?;
+                writeln!(out, "FNH:0")?;
+            } else {
+                // Emit per-function entries.
+                for f in &report.functions {
+                    let display_name = fn_display_name(f);
+                    // Use function index as the "line number".
+                    writeln!(out, "FN:{},{display_name}", f.index)?;
+                }
+                for f in &report.functions {
+                    let display_name = fn_display_name(f);
+                    let hit: u32 = if f.error.is_none() { 1 } else { 0 };
+                    writeln!(out, "FNDA:{hit},{display_name}")?;
+                }
+                // For failures, emit the reason as a BRDA record so tools
+                // can show what went wrong.
+                for f in &report.functions {
+                    if let Some(ref err) = f.error {
+                        let display_name = fn_display_name(f);
+                        // Encode as branch data: line=fn_index, block=0, branch=0
+                        writeln!(out, "BRDA:{},0,0,{display_name}: {err}", f.index)?;
+                    }
+                }
+                writeln!(out, "FNF:{}", report.functions.len())?;
+                writeln!(out, "FNH:{}", report.passed())?;
+            }
+        } else if let Some(ref err) = file_result.error {
+            // Entire file failed to process.
+            writeln!(out, "FN:0,(file-error)")?;
+            writeln!(out, "FNDA:0,(file-error)")?;
+            writeln!(out, "BRDA:0,0,0,{err}")?;
+            writeln!(out, "FNF:1")?;
+            writeln!(out, "FNH:0")?;
+        }
+
+        writeln!(out, "end_of_record")?;
+    }
+
+    Ok(())
+}
+
+/// Build a display name for a function result.
+fn fn_display_name(f: &FunctionResult) -> String {
+    if f.is_main {
+        if f.name.is_empty() {
+            "(module)".to_string()
+        } else {
+            format!("(module) {}", f.name)
+        }
+    } else if f.name.is_empty() {
+        format!("fn#{}", f.index)
+    } else {
+        f.name.clone()
+    }
 }
 
 fn compile_luau_binary(lua_path: &Path) -> Result<Vec<u8>> {
@@ -272,7 +497,8 @@ fn decompile_inputs(
 ) -> Result<Vec<GeneratedCase>> {
     let mut cases = Vec::with_capacity(inputs.len());
     for (idx, path) in inputs.iter().enumerate() {
-        let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+        let bytes =
+            fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
         let lua = lantern::decompile_bytecode(&bytes, encode_key);
         if lua.starts_with("-- lantern parse error:") {
             bail!(
@@ -324,7 +550,8 @@ fn prepare_output_dir(out_dir: Option<&Path>) -> Result<(PathBuf, bool)> {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    let dir = std::env::temp_dir().join(format!("lantern-verify-{}-{}", std::process::id(), stamp));
+    let dir =
+        std::env::temp_dir().join(format!("lantern-verify-{}-{}", std::process::id(), stamp));
     fs::create_dir_all(&dir)
         .with_context(|| format!("failed to create temp output directory {}", dir.display()))?;
     Ok((dir, true))

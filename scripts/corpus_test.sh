@@ -1,9 +1,23 @@
 #!/bin/bash
-# Run corpus roundtrip tests across top-level script folders
-# Outputs a formatted table with pass rates per folder
+# Run corpus roundtrip tests across top-level script folders.
+# Produces:
+#   1. A formatted table with per-folder pass rates (to stdout)
+#   2. An LCOV tracefile (to --lcov <path> or corpus_roundtrip.lcov)
+#
+# Usage:
+#   scripts/corpus_test.sh [SCRIPTS_DIR] [--lcov PATH]
 set -euo pipefail
 
-SCRIPTS_DIR="${1:-/Users/kim/dev/fs25/dataS/scripts}"
+# Parse arguments
+SCRIPTS_DIR="/Users/kim/dev/fs25/dataS/scripts"
+LCOV_PATH="corpus_roundtrip.lcov"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --lcov) LCOV_PATH="$2"; shift 2 ;;
+        *)      SCRIPTS_DIR="$1"; shift ;;
+    esac
+done
+
 TMPDIR_RESULTS=$(mktemp -d)
 MAX_JOBS="${MAX_JOBS:-8}"
 
@@ -20,29 +34,15 @@ for dir in "$SCRIPTS_DIR"/*/; do
     jobs+=("$name|$dir")
 done
 
-# Sum up "N checked, N passed, N mismatches" lines into "C P M"
-sum_results() {
-    awk '
-    /checked/ { for(i=1;i<=NF;i++) if($(i+1)~/^checked/) c+=$i }
-    /passed/  { for(i=1;i<=NF;i++) if($(i+1)~/^passed/)  p+=$i }
-    /mismatches/ { for(i=1;i<=NF;i++) if($(i+1)~/^mismatch/) m+=$i }
-    END { print c+0, p+0, m+0 }
-    '
-}
-
-# Run jobs with limited concurrency
+# Run jobs with limited concurrency — each emits LCOV to a temp file
 running=0
 for job in "${jobs[@]}"; do
     name="${job%%|*}"
     target="${job#*|}"
     (
         # shellcheck disable=SC2086
-        output=$(cargo run -p lantern-verify -- roundtrip $target 2>/dev/null | grep "compile roundtrip:" || true)
-        if [ -z "$output" ]; then
-            echo "0 0 0" > "$TMPDIR_RESULTS/$name"
-        else
-            echo "$output" | sum_results > "$TMPDIR_RESULTS/$name"
-        fi
+        cargo run -p lantern-verify -- roundtrip --format lcov $target 2>/dev/null \
+            > "$TMPDIR_RESULTS/${name}.lcov" || true
     ) &
     running=$((running + 1))
     if [ "$running" -ge "$MAX_JOBS" ]; then
@@ -52,40 +52,68 @@ for job in "${jobs[@]}"; do
 done
 wait
 
-# Print table header
+# Merge all LCOV files into one
+> "$LCOV_PATH"
+for f in "$TMPDIR_RESULTS"/*.lcov; do
+    cat "$f" >> "$LCOV_PATH"
+done
+
+# Parse LCOV to build the table: per-folder FNF/FNH sums
+# Each SF: line gives us the source path; we extract the folder from it.
 fmt="%-40s %8s %8s %8s %7s\n"
 printf "\n$fmt" "Folder" "Check" "Pass" "Fail" "Rate"
 printf "$fmt" "---" "---" "---" "---" "---"
 
-# Collect and display sorted results as a table
-total_checked=0
-total_passed=0
-total_mismatch=0
+awk -v scripts_dir="$SCRIPTS_DIR" '
+BEGIN {
+    total_fnf = 0; total_fnh = 0;
+}
+/^SF:/ {
+    path = substr($0, 4)
+    sub("^" scripts_dir "/?", "", path)
+    idx = index(path, "/")
+    if (idx > 0) {
+        folder = substr(path, 1, idx - 1)
+    } else {
+        folder = "(root)"
+    }
+}
+/^FNF:/ { fnf = substr($0, 5) + 0; folders_fnf[folder] += fnf; total_fnf += fnf }
+/^FNH:/ { fnh = substr($0, 5) + 0; folders_fnh[folder] += fnh; total_fnh += fnh }
+END {
+    # Collect and sort folder names (portable: no asorti)
+    n = 0
+    for (f in folders_fnf) { names[n++] = f }
+    for (i = 0; i < n; i++) {
+        for (j = i + 1; j < n; j++) {
+            if (names[i] > names[j]) {
+                t = names[i]; names[i] = names[j]; names[j] = t
+            }
+        }
+    }
+    for (i = 0; i < n; i++) {
+        f = names[i]
+        checked = folders_fnf[f]
+        passed = folders_fnh[f] + 0
+        fail = checked - passed
+        if (checked > 0) {
+            pct = sprintf("%.1f", passed * 100.0 / checked)
+        } else {
+            pct = "0.0"
+        }
+        printf "%-40s %8d %8d %8d %6s%%\n", f, checked, passed, fail, pct
+    }
+    printf "%-40s %8s %8s %8s %7s\n", "---", "---", "---", "---", "---"
+    if (total_fnf > 0) {
+        total_pct = sprintf("%.1f", total_fnh * 100.0 / total_fnf)
+    } else {
+        total_pct = "0.0"
+    }
+    printf "%-40s %8d %8d %8d %6s%%\n", "TOTAL", total_fnf, total_fnh, total_fnf - total_fnh, total_pct
+}
+' "$LCOV_PATH"
 
-for f in $(ls "$TMPDIR_RESULTS"/ | sort); do
-    name="$f"
-    read -r checked passed mismatch < "$TMPDIR_RESULTS/$f"
-
-    if [ "$checked" -gt 0 ]; then
-        pct=$(echo "scale=1; $passed * 100 / $checked" | bc)
-    else
-        pct="0.0"
-    fi
-
-    printf "%-40s %8d %8d %8d %6s%%\n" "$name" "$checked" "$passed" "$mismatch" "$pct"
-
-    total_checked=$((total_checked + checked))
-    total_passed=$((total_passed + passed))
-    total_mismatch=$((total_mismatch + mismatch))
-done
-
-# Summary
-printf "$fmt" "---" "---" "---" "---" "---"
-if [ "$total_checked" -gt 0 ]; then
-    total_pct=$(echo "scale=1; $total_passed * 100 / $total_checked" | bc)
-else
-    total_pct="0.0"
-fi
-printf "%-40s %8d %8d %8d %6s%%\n" "TOTAL" "$total_checked" "$total_passed" "$total_mismatch" "$total_pct"
+echo ""
+echo "LCOV tracefile written to: $LCOV_PATH"
 
 rm -rf "$TMPDIR_RESULTS"
