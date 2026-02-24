@@ -421,6 +421,7 @@ MapHotspot.l64
 MapManager.l64
 MapObjectDestroyedEvent.l64
 MasterServerConnection.l64
+MaterialUtil.l64
 MemoryLeaks.l64
 MessageDialog.l64
 MessageIds.l64
