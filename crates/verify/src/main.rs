@@ -22,10 +22,21 @@ enum Command {
     GrammarCases(GrammarCasesArgs),
 }
 
-fn main() -> Result<()> {
+fn real_main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Roundtrip(args) => roundtrip::run(args),
         Command::GrammarCases(args) => generator::run_grammar_cases(args),
     }
+}
+
+fn main() -> Result<()> {
+    // Spawn with a larger stack to handle deeply recursive IR traversals
+    // (matching the CLI binary's 32 MB stack).
+    let builder = std::thread::Builder::new().stack_size(32 * 1024 * 1024);
+    builder
+        .spawn(|| real_main())
+        .expect("failed to spawn main thread")
+        .join()
+        .expect("main thread panicked")
 }
