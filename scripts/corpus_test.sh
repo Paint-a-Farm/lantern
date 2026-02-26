@@ -11,9 +11,11 @@ set -euo pipefail
 # Parse arguments
 SCRIPTS_DIR="/Users/kim/dev/fs25/dataS/scripts"
 LCOV_PATH="corpus_roundtrip.lcov"
+COMPARE_MODE="loose"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --lcov) LCOV_PATH="$2"; shift 2 ;;
+        --compare-mode) COMPARE_MODE="$2"; shift 2 ;;
         *)      SCRIPTS_DIR="$1"; shift ;;
     esac
 done
@@ -45,7 +47,7 @@ run_job() {
     local name="$1"
     local target="$2"
     # shellcheck disable=SC2086
-    "$VERIFY_BIN" roundtrip --format lcov $target \
+    "$VERIFY_BIN" roundtrip --compare-mode "$COMPARE_MODE" --format lcov $target \
         > "$TMPDIR_RESULTS/${name}.lcov" \
         2> "$TMPDIR_RESULTS/${name}.err" || true
 }

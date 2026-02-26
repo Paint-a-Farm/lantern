@@ -14,6 +14,7 @@ use crate::normalize::{self, ChunkCompareReport, CompareMode, FunctionResult};
 pub enum CompareModeArg {
     Loose,
     Strict,
+    Semantic,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -237,6 +238,7 @@ fn to_compare_mode(mode: CompareModeArg) -> CompareMode {
     match mode {
         CompareModeArg::Loose => CompareMode::Loose,
         CompareModeArg::Strict => CompareMode::Strict,
+        CompareModeArg::Semantic => CompareMode::Semantic,
     }
 }
 
