@@ -192,24 +192,35 @@ impl<'a> Lifter<'a> {
         while pc < end_pc {
             // Check if this PC starts a boolean value computation region.
             // If so, lift the entire region as a single expression.
+            // Reject patterns that would overshoot the block boundary — they
+            // were detected on the raw instruction stream and may span across
+            // block-creating opcodes (e.g. FORGPREP/FORGLOOP).
             if let Some(advance) = self.try_lift_bool_region(pc) {
-                pc += advance;
-                continue;
+                if pc + advance <= end_pc {
+                    pc += advance;
+                    continue;
+                }
             }
             // Check if this PC starts an `a and b or c` ternary.
             if let Some(advance) = self.try_lift_and_or_ternary(pc) {
-                pc += advance;
-                continue;
+                if pc + advance <= end_pc {
+                    pc += advance;
+                    continue;
+                }
             }
             // Check if this PC starts a truthiness-based or/and chain.
             if let Some(advance) = self.try_lift_truthy_chain(pc) {
-                pc += advance;
-                continue;
+                if pc + advance <= end_pc {
+                    pc += advance;
+                    continue;
+                }
             }
             // Check if this PC starts a simple conditional value ternary.
             if let Some(advance) = self.try_lift_value_ternary(pc) {
-                pc += advance;
-                continue;
+                if pc + advance <= end_pc {
+                    pc += advance;
+                    continue;
+                }
             }
             let insn = &self.func.instructions[pc];
             let advance = self.lift_instruction(insn, pc);

@@ -43,6 +43,8 @@ fn inline_pass(func: &mut HirFunc) -> usize {
     let mut dead_calls: FxHashSet<VarId> = FxHashSet::default();
     let mut dead_call_extracts: FxHashSet<VarId> = FxHashSet::default();
     let mut def_blocks: FxHashMap<VarId, NodeIndex> = FxHashMap::default();
+    // VarIds that have been seen in multiple definitions — never inline these.
+    let mut multi_def: FxHashSet<VarId> = FxHashSet::default();
 
     for node_idx in func.cfg.node_indices() {
         let block = &func.cfg[node_idx];
@@ -55,6 +57,7 @@ fn inline_pass(func: &mut HirFunc) -> usize {
             &mut dead_calls,
             &mut dead_call_extracts,
             &mut def_blocks,
+            &mut multi_def,
             node_idx,
         );
     }
@@ -136,6 +139,7 @@ fn find_candidates_in_stmts(
     dead_calls: &mut FxHashSet<VarId>,
     dead_call_extracts: &mut FxHashSet<VarId>,
     def_blocks: &mut FxHashMap<VarId, NodeIndex>,
+    multi_def: &mut FxHashSet<VarId>,
     current_block: NodeIndex,
 ) {
     for stmt in stmts {
@@ -171,8 +175,19 @@ fn find_candidates_in_stmts(
                     if !(matches!(func.exprs.get(*value), HirExpr::Table { .. })
                         && is_var_used_as_table_target(func, *var_id))
                     {
-                        single_use.insert(*var_id, *value);
-                        def_blocks.insert(*var_id, current_block);
+                        // If this VarId has multiple definitions, inlining
+                        // would pick the wrong value when the use is only
+                        // reached by one of the defs. Skip entirely.
+                        if multi_def.contains(var_id) {
+                            // Already known multi-def — don't add
+                        } else if single_use.contains_key(var_id) {
+                            // Second def encountered — remove and mark as multi-def
+                            single_use.remove(var_id);
+                            multi_def.insert(*var_id);
+                        } else {
+                            single_use.insert(*var_id, *value);
+                            def_blocks.insert(*var_id, current_block);
+                        }
                     }
                 }
             }
@@ -195,6 +210,7 @@ fn find_candidates_in_stmts(
                     dead_calls,
                     dead_call_extracts,
                     def_blocks,
+                    multi_def,
                     current_block,
                 );
                 for clause in elseif_clauses {
@@ -207,6 +223,7 @@ fn find_candidates_in_stmts(
                         dead_calls,
                         dead_call_extracts,
                         def_blocks,
+                        multi_def,
                         current_block,
                     );
                 }
@@ -220,6 +237,7 @@ fn find_candidates_in_stmts(
                         dead_calls,
                         dead_call_extracts,
                         def_blocks,
+                        multi_def,
                         current_block,
                     );
                 }
@@ -237,6 +255,7 @@ fn find_candidates_in_stmts(
                     dead_calls,
                     dead_call_extracts,
                     def_blocks,
+                    multi_def,
                     current_block,
                 );
             }
