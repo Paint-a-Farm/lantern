@@ -152,12 +152,17 @@ pub fn writes_register(insn: &Instruction, register: u8) -> bool {
 /// Check if instructions in `[from, to)` write to any register other than
 /// `expected_reg`. Used to distinguish value ternaries (single result register)
 /// from multi-assignment if/else branches.
+///
+/// Writes inside table constructor regions (NewTable/DupTable → SetList) are
+/// excluded because they are temporary element loads, not independent register
+/// writes.
 pub fn writes_multiple_registers(
     instructions: &[Instruction],
     from: usize,
     to: usize,
     expected_reg: u8,
 ) -> bool {
+    let mut in_table_ctor = false;
     for pc in from..to {
         if pc >= instructions.len() {
             break;
@@ -165,6 +170,20 @@ pub fn writes_multiple_registers(
         let insn = &instructions[pc];
         // Skip Nop (AUX words)
         if insn.op == OpCode::Nop {
+            continue;
+        }
+        // Track table constructor regions: NewTable/DupTable writing to expected_reg
+        // starts a region; SetList on expected_reg ends it. Writes inside the region
+        // are element temporaries and should be ignored.
+        if matches!(insn.op, OpCode::NewTable | OpCode::DupTable) && insn.a == expected_reg {
+            in_table_ctor = true;
+            continue;
+        }
+        if insn.op == OpCode::SetList && insn.a == expected_reg {
+            in_table_ctor = false;
+            continue;
+        }
+        if in_table_ctor {
             continue;
         }
         // If this instruction writes to A and A != expected_reg, it's multi-reg
@@ -180,6 +199,10 @@ pub fn writes_multiple_registers(
 ///
 /// This validates that a range is a simple value reload, distinguishing
 /// `a or b` from `if a then <body> end`.
+///
+/// Instructions inside table constructor regions (NewTable/DupTable → SetList)
+/// targeting the chain register are allowed, since they are part of a table
+/// literal value expression (e.g. `a or {1, 2, 3}`).
 pub fn tail_loads_register(
     instructions: &[Instruction],
     from: usize,
@@ -187,11 +210,26 @@ pub fn tail_loads_register(
     register: u8,
 ) -> bool {
     let mut found_load = false;
+    let mut in_table_ctor = false;
     for pc in from..to {
         if pc >= instructions.len() {
             return false;
         }
         let insn = &instructions[pc];
+
+        // Track table constructor regions on the chain register.
+        if matches!(insn.op, OpCode::NewTable | OpCode::DupTable) && insn.a == register {
+            in_table_ctor = true;
+            found_load = true;
+            continue;
+        }
+        if insn.op == OpCode::SetList && insn.a == register {
+            in_table_ctor = false;
+            continue;
+        }
+        if in_table_ctor {
+            continue;
+        }
 
         if writes_register(insn, register) {
             found_load = true;
@@ -214,12 +252,32 @@ pub fn tail_loads_register(
 }
 
 /// Check if instructions in `[from, to)` have side effects beyond simple loads.
+///
+/// Instructions inside table constructor regions (NewTable/DupTable → SetList)
+/// are allowed — they are part of a value expression.
 pub fn tail_has_side_effects(instructions: &[Instruction], from: usize, to: usize) -> bool {
+    let mut in_table_ctor = false;
     for pc in from..to {
         if pc >= instructions.len() {
             return true;
         }
         let insn = &instructions[pc];
+
+        // Track table constructor regions. We need to know the register, but
+        // tail_has_side_effects doesn't receive one. Instead, track ANY
+        // NewTable/DupTable → SetList pair on the same register.
+        if matches!(insn.op, OpCode::NewTable | OpCode::DupTable) {
+            in_table_ctor = true;
+            continue;
+        }
+        if insn.op == OpCode::SetList {
+            in_table_ctor = false;
+            continue;
+        }
+        if in_table_ctor {
+            continue;
+        }
+
         if is_chain_barrier(insn) || conditional_jump_target(insn, pc).is_some() {
             return true;
         }

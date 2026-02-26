@@ -102,7 +102,7 @@ pub fn find_bool_regions(instructions: &[Instruction]) -> Vec<BoolRegion> {
             // Determine OR vs AND by looking at the pre-init LOADB value.
             // OR chain: pre-init is `true` (LOADB Rx, 1)
             // AND chain: pre-init is `false` (LOADB Rx, 0)
-            let is_or_chain = if start_pc < false_pc {
+            let mut is_or_chain = if start_pc < false_pc {
                 let start_insn = &instructions[start_pc];
                 if start_insn.op == OpCode::LoadB && start_insn.a == result_reg && start_insn.c == 0
                 {
@@ -113,6 +113,26 @@ pub fn find_bool_regions(instructions: &[Instruction]) -> Vec<BoolRegion> {
             } else {
                 None // Single comparison, no pre-init.
             };
+
+            // Fallback: when the pre-init isn't a LoadB (e.g. `Move Rx, Ry`
+            // for `finished and expr`), infer the chain type from any
+            // JumpIf/JumpIfNot that targets end_pc within the region.
+            // JumpIfNot → end_pc means "short-circuit falsy" = AND chain.
+            // JumpIf → end_pc means "short-circuit truthy" = OR chain.
+            if is_or_chain.is_none() && start_pc < false_pc {
+                for scan in start_pc..false_pc {
+                    let si = &instructions[scan];
+                    let target = ((scan + 1) as i64 + si.d as i64) as usize;
+                    if si.op == OpCode::JumpIfNot && si.a == result_reg && target == end_pc {
+                        is_or_chain = Some(false); // AND chain
+                        break;
+                    }
+                    if si.op == OpCode::JumpIf && si.a == result_reg && target == end_pc {
+                        is_or_chain = Some(true); // OR chain
+                        break;
+                    }
+                }
+            }
 
             regions.push(BoolRegion {
                 start_pc,

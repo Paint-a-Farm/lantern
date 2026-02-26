@@ -49,7 +49,12 @@ pub(super) fn inline_return_temps(func: &HirFunc, mut stmts: Vec<HirStmt>) -> Ve
                 } = &stmts[start + i]
                 {
                     if let HirExpr::Var(ret_var) = func.exprs.get(ret_vals[i]) {
-                        if ret_var == def_var {
+                        // Only inline unnamed temps — named variables like
+                        // `instance` must keep the assignment to preserve
+                        // the Move instruction in the roundtrip.
+                        if ret_var == def_var
+                            && func.vars.get(*def_var).name.is_none()
+                        {
                             values.push(*value);
                             continue;
                         }

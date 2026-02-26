@@ -34,31 +34,11 @@ pub(super) fn strip_trailing_returns(stmts: &mut Vec<HirStmt>) {
         stmts.pop();
     }
 
-    // If the last statement is an if, recurse into all its branches
-    if let Some(HirStmt::If {
-        then_body,
-        elseif_clauses,
-        else_body,
-        ..
-    }) = stmts.last_mut()
-    {
-        // Check if any branch ends with a non-bare return (return <value>).
-        // If so, don't strip bare returns from other branches — the compiler
-        // generates different bytecode (Jump + trailing Return vs inline Return).
-        let has_valued_return = has_non_bare_return(then_body)
-            || elseif_clauses.iter().any(|c| has_non_bare_return(&c.body))
-            || else_body.as_ref().is_some_and(|b| has_non_bare_return(b));
-
-        if !has_valued_return {
-            strip_trailing_return_if_not_sole(then_body);
-            for clause in elseif_clauses.iter_mut() {
-                strip_trailing_return_if_not_sole(&mut clause.body);
-            }
-            if let Some(else_body) = else_body {
-                strip_trailing_return_if_not_sole(else_body);
-            }
-        }
-    }
+    // Don't recurse into if-branch bodies to strip bare returns.
+    // The compiler generates explicit Return ops in branches when the
+    // if-block is at the end of a function, which differs from the
+    // Jump+trailing-Return pattern used when returns are omitted.
+    // Stripping changes the opcode histogram and breaks roundtrip fidelity.
 }
 
 /// Check if a statement list ends with `return <values>` (non-empty return).

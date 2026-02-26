@@ -1,0 +1,9 @@
+# collections/ baseline — 2025-02-25
+# 10/15 files passing, 159/167 functions (95.2%)
+#
+# Remaining failures (analyzed, not fixable without major refactoring):
+#   BaseStateMachineState fn#14: Move:-1 (register allocation)
+#   TestPolygon fn#1: Move:-2 (register allocation)
+#   ValueDelay fn#1: Jump:-2 (compiler version routing blocks)
+#   DynamicDataGrid fn#11: many (bool value → truthiness chain merging)
+#   Polygon2D fn#13: many (cross-register value ternary)

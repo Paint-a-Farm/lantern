@@ -31,14 +31,13 @@ pub fn fold_ternary_patterns(func: &mut HirFunc, stmts: Vec<HirStmt>) -> Vec<Hir
     let mut i = 0;
 
     while i < stmts.len() {
-        // Pattern 1: assignment + if-then (no else)
-        if i + 1 < stmts.len() {
-            if let Some(folded) = try_fold_assign_then_if(func, &stmts[i], &stmts[i + 1]) {
-                result.push(folded);
-                i += 2;
-                continue;
-            }
-        }
+        // Pattern 1: `x = b; if cond then x = a end` → `x = cond and a or b`
+        //
+        // DISABLED: This fold changes bytecode structure. The original compiler
+        // uses a JumpIf pre-assign+overwrite pattern for conditional assignments,
+        // while the ternary form uses JumpIfNot+JumpIf. If the pre-lifting
+        // ternary detectors didn't recognize the pattern, the original bytecode
+        // was NOT a ternary and folding would break roundtrip fidelity.
 
         // Pattern 2: if-then-else with single assignment in each branch
         if let Some(folded) = try_fold_if_else(func, &stmts[i]) {

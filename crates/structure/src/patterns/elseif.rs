@@ -24,10 +24,33 @@
 //! end
 //! ```
 
+use lantern_hir::expr::HirExpr;
 use lantern_hir::func::HirFunc;
 use lantern_hir::stmt::{ElseIfClause, HirStmt};
+use lantern_hir::types::{BinOp, UnOp};
 
 use super::conditions::negate_condition;
+
+/// Check if negating a condition would be "clean" — either removing an existing
+/// `not` wrapper or inverting a comparison operator — without adding a `not()`
+/// wrapper that would change the emitted bytecode.
+fn is_cleanly_negatable(func: &HirFunc, condition: lantern_hir::arena::ExprId) -> bool {
+    match func.exprs.get(condition) {
+        HirExpr::Unary {
+            op: UnOp::Not, ..
+        } => true,
+        HirExpr::Binary { op, .. } => matches!(
+            op,
+            BinOp::CompareEq
+                | BinOp::CompareNe
+                | BinOp::CompareLt
+                | BinOp::CompareLe
+                | BinOp::CompareGt
+                | BinOp::CompareGe
+        ),
+        _ => false,
+    }
+}
 
 /// Normalize inverted elseif chains.
 ///
@@ -65,6 +88,18 @@ fn normalize_inverted_elseif_inner(func: &mut HirFunc, stmt: HirStmt, in_chain: 
     let is_chain = then_body.len() == 1
         && matches!(&then_body[0], HirStmt::If { else_body: Some(_), elseif_clauses, .. } if elseif_clauses.is_empty());
     let else_body = else_body.unwrap();
+
+    // Only apply the inversion when the condition can be cleanly negated
+    // (comparison inversion or `not` removal). Adding a `not()` wrapper would
+    // change the bytecode from JumpIfNot to JumpIf, breaking roundtrip fidelity.
+    if is_chain && !in_chain && !is_cleanly_negatable(func, condition) {
+        return HirStmt::If {
+            condition,
+            then_body,
+            elseif_clauses: Vec::new(),
+            else_body: Some(else_body),
+        };
+    }
 
     if !is_chain {
         if in_chain {

@@ -529,19 +529,44 @@ impl<'a> super::Lifter<'a> {
                     pc,
                 );
 
-                // Invert: the condition is what makes you NOT jump (= stay in then-body)
-                let op = match insn.op {
-                    OpCode::JumpIfNotEq => BinOp::CompareEq, // source: if a == b
-                    OpCode::JumpIfNotLe => BinOp::CompareLe, // source: if a <= b
-                    OpCode::JumpIfNotLt => BinOp::CompareLt, // source: if a < b
-                    OpCode::JumpIfEq => BinOp::CompareNe,    // source: if a ~= b
-                    OpCode::JumpIfLe => BinOp::CompareGt,    // source: if a > b
-                    OpCode::JumpIfLt => BinOp::CompareGe,    // source: if a >= b
+                // Invert: the condition is what makes you NOT jump (= stay in then-body).
+                //
+                // For the "Not" variants (JumpIfNotEq/Le/Lt), the jump fires when the
+                // comparison is FALSE, so the body condition is the comparison itself.
+                //
+                // For the affirmative variants (JumpIfEq/Le/Lt), the jump fires when the
+                // comparison is TRUE, so the body condition is the negation.
+                //
+                // Eq/Ne: invert by using the complementary operator (== ↔ ~=). This is
+                // safe because the Luau compiler maps both to the same opcode family.
+                //
+                // Lt/Le: we must NOT convert to Ge/Gt because the compiler generates
+                // different opcodes for `a >= b` (→ JumpIfNotLe(b,a)) vs `not(a < b)`
+                // (→ JumpIfLt(a,b)). Instead, wrap in `not()` to preserve the original
+                // opcode/operand pair.
+                let (op, wrap_not) = match insn.op {
+                    OpCode::JumpIfNotEq => (BinOp::CompareEq, false), // source: if a == b
+                    OpCode::JumpIfNotLe => (BinOp::CompareLe, false), // source: if a <= b
+                    OpCode::JumpIfNotLt => (BinOp::CompareLt, false), // source: if a < b
+                    OpCode::JumpIfEq => (BinOp::CompareNe, false),    // source: if a ~= b
+                    OpCode::JumpIfLe => (BinOp::CompareLe, true),     // source: if not(a <= b)
+                    OpCode::JumpIfLt => (BinOp::CompareLt, true),     // source: if not(a < b)
                     _ => unreachable!(),
                 };
 
                 let negated = matches!(insn.op, OpCode::JumpIfNotEq | OpCode::JumpIfNotLe | OpCode::JumpIfNotLt);
-                let cond = self.alloc_expr(HirExpr::Binary { op, left, right }, pc);
+                let inner = self.alloc_expr(HirExpr::Binary { op, left, right }, pc);
+                let cond = if wrap_not {
+                    self.alloc_expr(
+                        HirExpr::Unary {
+                            op: UnOp::Not,
+                            operand: inner,
+                        },
+                        pc,
+                    )
+                } else {
+                    inner
+                };
                 let target = ((pc + 1) as i64 + insn.d as i64) as usize;
                 self.emit_branch(cond, pc + 2, target, negated);
                 2 // AUX

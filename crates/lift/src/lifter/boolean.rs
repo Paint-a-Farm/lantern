@@ -18,6 +18,7 @@ impl<'a> super::Lifter<'a> {
 
         // Copy fields to avoid borrowing self.bool_regions while we mutate self.
         let false_pc = self.bool_regions[region_idx].false_pc;
+        let true_pc = self.bool_regions[region_idx].true_pc;
         let end_pc = self.bool_regions[region_idx].end_pc;
         let result_reg = self.bool_regions[region_idx].result_reg;
         let is_or_chain = self.bool_regions[region_idx].is_or_chain;
@@ -40,24 +41,22 @@ impl<'a> super::Lifter<'a> {
 
             // Check if this is a conditional jump inside the boolean region
             if let Some(cond_expr) = self.lift_bool_condition(insn, scan_pc) {
-                // For JumpXEqK* in AND chains, bail-out jumps (target==end_pc)
-                // need the condition negated. Unlike JumpIfEq/JumpIfNotEq which
-                // encode direction in the opcode, JumpXEqK* uses the same form
-                // for both chain types — we disambiguate via jump target.
-                let cond_expr = if matches!(
-                    insn.op,
-                    OpCode::JumpXEqKNil | OpCode::JumpXEqKB | OpCode::JumpXEqKN | OpCode::JumpXEqKS
-                ) {
-                    let target = ((scan_pc + 1) as i64 + insn.d as i64) as usize;
-                    if target == end_pc && is_or_chain == Some(false) {
-                        // AND chain bail-out: source condition is the negation
-                        // of the jump test. Flip Eq↔Ne.
-                        self.negate_comparison(cond_expr, scan_pc)
-                    } else {
-                        cond_expr
-                    }
-                } else {
+                // lift_bool_condition returns the ACTUAL jump condition (what
+                // triggers the jump). We need the SOURCE condition — what the
+                // programmer wrote.
+                //
+                // Determine if the jump target means "result = TRUE":
+                //   - target == true_pc → result is TRUE
+                //   - target == end_pc AND is_or_chain → result is TRUE
+                //     (skips epilogue, pre-init was true)
+                //   - otherwise → result is FALSE → negate
+                let target = ((scan_pc + 1) as i64 + insn.d as i64) as usize;
+                let targets_true = target == true_pc
+                    || (target == end_pc && is_or_chain == Some(true));
+                let cond_expr = if targets_true {
                     cond_expr
+                } else {
+                    self.negate_comparison(cond_expr, scan_pc)
                 };
                 conditions.push(cond_expr);
                 // Advance past AUX word if needed
@@ -537,9 +536,11 @@ impl<'a> super::Lifter<'a> {
         Some(join_pc - pc)
     }
 
-    /// Extract a comparison expression from a conditional jump instruction
-    /// inside a boolean region. Returns the condition as a HirExpr if this
-    /// is a recognized conditional jump, None otherwise.
+    /// Extract the ACTUAL jump condition from a conditional jump instruction.
+    ///
+    /// Returns the comparison that triggers the jump (i.e. when this condition
+    /// is true, the jump fires). The caller must negate based on jump target
+    /// to recover the source-level expression.
     fn lift_bool_condition(&mut self, insn: &Instruction, pc: usize) -> Option<ExprId> {
         match insn.op {
             OpCode::JumpIfEq
@@ -558,20 +559,15 @@ impl<'a> super::Lifter<'a> {
                     pc,
                 );
 
-                // Extract the POSITIVE comparison condition.
-                //
-                // OR-chain uses positive jumps (JUMPIFEQ/LE/LT) → extract as-is
-                // AND-chain uses negated jumps (JUMPIFNOTEQ/NOTLE/NOTLT) → negate back
-                //
-                // In both cases we want the positive comparison that the source
-                // code expresses as an operand.
+                // Return the ACTUAL comparison that triggers the jump.
+                // JumpIfEq fires when ==, JumpIfNotEq fires when ~=, etc.
                 let op = match insn.op {
                     OpCode::JumpIfEq => BinOp::CompareEq,
                     OpCode::JumpIfLe => BinOp::CompareLe,
                     OpCode::JumpIfLt => BinOp::CompareLt,
-                    OpCode::JumpIfNotEq => BinOp::CompareEq, // not(!=) = ==
-                    OpCode::JumpIfNotLe => BinOp::CompareLe, // not(not(<=)) = <=
-                    OpCode::JumpIfNotLt => BinOp::CompareLt, // not(not(<)) = <
+                    OpCode::JumpIfNotEq => BinOp::CompareNe,
+                    OpCode::JumpIfNotLe => BinOp::CompareGt, // not(<=) = >
+                    OpCode::JumpIfNotLt => BinOp::CompareGe, // not(<) = >=
                     _ => unreachable!(),
                 };
 
@@ -628,31 +624,18 @@ impl<'a> super::Lifter<'a> {
 
     /// Extract the SOURCE condition from a ternary leading jump.
     ///
-    /// In a ternary, the jump fires when the source condition is FALSE.
-    /// `lift_bool_condition` returns the "positive comparison" for register-pair
-    /// jumps and the "jump condition" for JumpXEqK*. This helper adjusts the
-    /// result so the caller gets the source condition the programmer wrote.
+    /// In a ternary, the jump fires when the source condition is FALSE
+    /// (it skips to the false-value branch). `lift_bool_condition` returns
+    /// the actual jump condition (what triggers the jump). The source
+    /// condition is always the negation of the jump condition.
     ///
-    /// Needs negation: JumpIfEq/Le/Lt, all JumpXEqK* (both NOT flag values)
-    /// No negation:    JumpIfNotEq/NotLe/NotLt (lift_bool_condition already
-    ///                 double-negated to positive, which IS the source condition)
-    fn negate_ternary_condition(&mut self, insn: &Instruction, cond: ExprId, _pc: usize) -> ExprId {
-        match insn.op {
-            // Positive-sense jumps: jump fires when comparison IS met.
-            // Source condition is the opposite → negate.
-            OpCode::JumpIfEq | OpCode::JumpIfLe | OpCode::JumpIfLt => {
-                self.hir.exprs.negate_condition(cond)
-            }
-            // JumpXEqK*: lift_bool_condition returns the jump condition.
-            // Source condition is the opposite → always negate.
-            OpCode::JumpXEqKNil | OpCode::JumpXEqKB | OpCode::JumpXEqKN | OpCode::JumpXEqKS => {
-                self.hir.exprs.negate_condition(cond)
-            }
-            // Negated-sense jumps: jump fires when comparison is NOT met.
-            // lift_bool_condition returns the positive comparison, which IS
-            // the source condition. No negation needed.
-            _ => cond,
-        }
+    /// Exception: JumpIfNot returns `not x`, and for ternaries the source
+    /// is `x` (truthiness test), not a comparison — handled by the caller
+    /// which only calls this for comparison opcodes.
+    fn negate_ternary_condition(&mut self, _insn: &Instruction, cond: ExprId, _pc: usize) -> ExprId {
+        // Always negate: ternary jump fires when source condition is FALSE,
+        // so source = NOT(jump_condition).
+        self.hir.exprs.negate_condition(cond)
     }
 
     /// Negate a comparison expression (flip Eq↔Ne, Lt↔Ge, Le↔Gt).

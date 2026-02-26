@@ -25,7 +25,7 @@ use lantern_bytecode::opcode::OpCode;
 use rustc_hash::FxHashSet;
 
 use super::utils::{
-    conditional_jump_target, has_aux_word, tail_loads_register, writes_multiple_registers,
+    conditional_jump_target, has_aux_word, tail_loads_register, writes_register,
 };
 
 /// A truthiness-based or/and chain in the instruction stream.
@@ -186,9 +186,12 @@ fn find_truthy_chains(instructions: &[Instruction]) -> Vec<TruthyChain> {
                     all_segments_valid = false;
                     break;
                 }
-                // Reject segments that write to registers beyond the chain
-                // register — these are if-bodies, not value expressions.
-                if writes_multiple_registers(instructions, seg_start, seg_end, reg) {
+                // Reject segments that write to registers below the chain
+                // register — these are independent locals (if-body), not a
+                // value expression. Writes above the chain register are
+                // allowed as expression intermediates (e.g. GetGlobal R3
+                // before GetTableKS R2, R3 in `val or GlobalTable.field`).
+                if segment_writes_below_reg(instructions, seg_start, seg_end, reg) {
                     all_segments_valid = false;
                     break;
                 }
@@ -229,4 +232,28 @@ fn find_truthy_chain_start(first_jump_pc: usize) -> usize {
     } else {
         0
     }
+}
+
+/// Check if a truthiness chain segment writes to any register below the chain
+/// register. Writes above are allowed as expression intermediates (e.g.
+/// `GetGlobal R3` before `GetTableKS R2, R3` for `val or Global.field`).
+fn segment_writes_below_reg(
+    instructions: &[Instruction],
+    from: usize,
+    to: usize,
+    chain_reg: u8,
+) -> bool {
+    for pc in from..to {
+        if pc >= instructions.len() {
+            break;
+        }
+        let insn = &instructions[pc];
+        if insn.op == OpCode::Nop {
+            continue;
+        }
+        if writes_register(insn, insn.a) && insn.a < chain_reg {
+            return true;
+        }
+    }
+    false
 }

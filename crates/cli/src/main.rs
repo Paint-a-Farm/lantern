@@ -404,6 +404,9 @@ fn dump_cfg_blocks(hir: &lantern_hir::func::HirFunc) {
             else_n,
             block.terminator
         );
+        if matches!(block.terminator, lantern_hir::cfg::Terminator::Jump) {
+            eprintln!("    jump → {:?}", lantern_hir::cfg::unconditional_successor(&hir.cfg, node));
+        }
         for (i, stmt) in block.stmts.iter().enumerate() {
             eprintln!("    stmt[{}]: {:?}", i, stmt);
         }

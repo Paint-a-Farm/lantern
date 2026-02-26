@@ -337,11 +337,6 @@ fn find_or_chain_body(func: &HirFunc, start: NodeIndex) -> Option<NodeIndex> {
         // Both Branch — check if one side is a convergence target reached
         // directly by the other side's chain. This handles `A or B` where
         // the body block itself starts with a Branch (if-then inside).
-        //
-        // To avoid false positives (e.g. picking an intermediate clause as
-        // the body), require that the candidate body is directly targeted
-        // by at least one edge in the other chain, AND has fewer outgoing
-        // chain-internal edges (i.e., it's an endpoint, not a relay).
         let else_in_degree = count_incoming_from_branches(func, else_n);
         let then_in_degree = count_incoming_from_branches(func, then_n);
         if else_in_degree > then_in_degree && branch_chain_reaches(func, then_n, else_n, 5) {
@@ -489,7 +484,12 @@ pub(super) fn structure_branch(
                     return stop;
                 }
                 if else_target == lctx.header {
-                    if negated {
+                    // Check for empty-else annotation before choosing form.
+                    // When the then-body ends with Jump+0, the wrapping form
+                    // is required to preserve the empty else in the output.
+                    let has_empty_else =
+                        has_empty_else_annotation(func, then_n, Some(else_target));
+                    if negated || has_empty_else {
                         // Wrapping form: `if cond then <body> end`
                         let then_stmts =
                             structure_region(func, then_n, stop, loop_ctx, visited);
@@ -497,7 +497,7 @@ pub(super) fn structure_branch(
                             condition,
                             then_body: then_stmts,
                             elseif_clauses: Vec::new(),
-                            else_body: None,
+                            else_body: if has_empty_else { Some(vec![]) } else { None },
                         });
                     } else {
                         // Guard form: `if NOT(cond) then continue end; <body>`
@@ -606,7 +606,7 @@ pub(super) fn structure_branch(
 
             let (elseif_clauses, final_else) = extract_elseif_chain(else_stmts);
 
-            if elseif_clauses.is_empty() && final_else.is_empty() {
+            if elseif_clauses.is_empty() && final_else.is_none() {
                 // Check if the then-branch ends with a Jump(0) — the
                 // compiler's artifact for an empty `else` body.  When
                 // present, emit `else end` to match the original source.
@@ -617,7 +617,8 @@ pub(super) fn structure_branch(
                     elseif_clauses: Vec::new(),
                     else_body: if has_empty_else { Some(vec![]) } else { None },
                 });
-            } else if elseif_clauses.is_empty() && !final_else.is_empty() {
+            } else if elseif_clauses.is_empty() && final_else.is_some() {
+                let final_else = final_else.unwrap();
                 if then_stmts.is_empty() {
                     // Empty then-body → flip to `if not cond then <else> end`
                     let inv_cond = negate_condition(func, condition);
@@ -661,11 +662,7 @@ pub(super) fn structure_branch(
                     condition,
                     then_body: then_stmts,
                     elseif_clauses,
-                    else_body: if final_else.is_empty() {
-                        None
-                    } else {
-                        Some(final_else)
-                    },
+                    else_body: final_else,
                 });
             }
 
@@ -810,6 +807,11 @@ fn has_empty_else_annotation(
                         return true;
                     }
                 }
+            } else {
+                // No join point known (e.g. last elseif clause whose body
+                // jumps to the enclosing loop header/stop). The Jump +0
+                // annotation alone is sufficient evidence.
+                return true;
             }
         }
         // Follow unconditional jumps deeper into the then-region.
@@ -827,9 +829,14 @@ fn has_empty_else_annotation(
     }
 }
 
+/// Extract an elseif chain from else_stmts.
+///
+/// Returns `(elseif_clauses, final_else)` where `final_else` is `None` if
+/// there is no else body, or `Some(stmts)` if there is (possibly empty for
+/// an explicit empty `else end`).
 pub(super) fn extract_elseif_chain(
     mut else_stmts: Vec<HirStmt>,
-) -> (Vec<ElseIfClause>, Vec<HirStmt>) {
+) -> (Vec<ElseIfClause>, Option<Vec<HirStmt>>) {
     if else_stmts.len() == 1 {
         if matches!(&else_stmts[0], HirStmt::If { .. }) {
             let stmt = else_stmts.remove(0);
@@ -845,10 +852,13 @@ pub(super) fn extract_elseif_chain(
                     body: then_body,
                 }];
                 clauses.extend(elseif_clauses);
-                let final_else = else_body.unwrap_or_default();
-                return (clauses, final_else);
+                return (clauses, else_body);
             }
         }
     }
-    (Vec::new(), else_stmts)
+    if else_stmts.is_empty() {
+        (Vec::new(), None)
+    } else {
+        (Vec::new(), Some(else_stmts))
+    }
 }

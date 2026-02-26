@@ -162,3 +162,11 @@ pub fn else_successor(graph: &CfgGraph, node: NodeIndex) -> Option<NodeIndex> {
         .find(|e| e.weight().kind == EdgeKind::Else)
         .map(|e| e.target())
 }
+
+/// Helper to find the unconditional successor of a Jump block.
+pub fn unconditional_successor(graph: &CfgGraph, node: NodeIndex) -> Option<NodeIndex> {
+    graph
+        .edges(node)
+        .find(|e| e.weight().kind == EdgeKind::Unconditional)
+        .map(|e| e.target())
+}
