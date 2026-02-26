@@ -29,6 +29,7 @@ pub fn decompile_bytecode(bytecode: &[u8], encode_key: u8) -> String {
 
         // Expression simplification (before structuring).
         lantern_exprs::collapse_multi_returns(&mut hir);
+        lantern_exprs::split_multi_def_temps(&mut hir);
         lantern_exprs::eliminate_temporaries(&mut hir);
         lantern_exprs::fold_table_constructors(&mut hir);
         lantern_exprs::eliminate_temporaries(&mut hir);
@@ -38,6 +39,7 @@ pub fn decompile_bytecode(bytecode: &[u8], encode_key: u8) -> String {
 
         // Post-structuring patterns and second optimization pass.
         lantern_structure::apply_patterns(&mut hir);
+        lantern_exprs::split_multi_def_temps(&mut hir);
         lantern_exprs::eliminate_temporaries(&mut hir);
         lantern_exprs::fold_table_constructors(&mut hir);
         lantern_exprs::eliminate_temporaries(&mut hir);

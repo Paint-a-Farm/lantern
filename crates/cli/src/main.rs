@@ -240,6 +240,7 @@ fn real_main() {
                 // (before structuring — the structurer inspects body sizes for guard detection)
                 let ((), exprs_duration) = timing::timed(|| {
                     lantern_exprs::collapse_multi_returns(&mut hir);
+                    lantern_exprs::split_multi_def_temps(&mut hir);
                     lantern_exprs::eliminate_temporaries(&mut hir);
                     lantern_exprs::fold_table_constructors(&mut hir);
                     lantern_exprs::eliminate_temporaries(&mut hir);
@@ -266,6 +267,7 @@ fn real_main() {
                 let ((), patterns_duration) = timing::timed(|| {
                     lantern_structure::apply_patterns(&mut hir);
                     // Second inline pass: catch temps inside structured bodies
+                    lantern_exprs::split_multi_def_temps(&mut hir);
                     lantern_exprs::eliminate_temporaries(&mut hir);
                     lantern_exprs::fold_table_constructors(&mut hir);
                     lantern_exprs::eliminate_temporaries(&mut hir);

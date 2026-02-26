@@ -143,50 +143,60 @@ fn find_candidates_in_stmts(
     current_block: NodeIndex,
 ) {
     for stmt in stmts {
-        // Check this statement for a candidate
-        if let HirStmt::Assign {
-            target: LValue::Local(var_id),
-            value,
-        } = stmt
-        {
-            let info = func.vars.get(*var_id);
+        // Check this statement for a candidate.
+        // Both Assign { Local } and LocalDecl are eligible for inlining.
+        let candidate = match stmt {
+            HirStmt::Assign {
+                target: LValue::Local(var_id),
+                value,
+            } => Some((*var_id, *value)),
+            HirStmt::LocalDecl {
+                var,
+                init: Some(value),
+            } => Some((*var, *value)),
+            _ => None,
+        };
+        if let Some((var_id, value)) = candidate {
+            let info = func.vars.get(var_id);
             let has_name = info.name.is_some();
-            let is_closure = matches!(func.exprs.get(*value), HirExpr::Closure { .. });
-            let uses = use_counts.get(var_id).copied().unwrap_or(0);
+            let is_closure = matches!(func.exprs.get(value), HirExpr::Closure { .. });
+            let uses = use_counts.get(&var_id).copied().unwrap_or(0);
+
+
 
             // Named variables are generally kept (not inlined), except:
             // - Closures with exactly 1 use can be inlined at the call site,
             //   but only if that use is an actual Var expression (not a capture).
             let closure_inlinable = is_closure && uses == 1
-                && has_var_expr_use(func, *var_id);
+                && has_var_expr_use(func, var_id);
             if !(has_name && !closure_inlinable) {
                 if uses == 0 {
-                    if !expr_has_side_effects(func, *value) {
-                        dead_stores.insert(*var_id);
-                        def_blocks.insert(*var_id, current_block);
-                    } else if is_statement_expr(func, *value) {
-                        dead_calls.insert(*var_id);
-                        def_blocks.insert(*var_id, current_block);
+                    if !expr_has_side_effects(func, value) {
+                        dead_stores.insert(var_id);
+                        def_blocks.insert(var_id, current_block);
+                    } else if is_statement_expr(func, value) {
+                        dead_calls.insert(var_id);
+                        def_blocks.insert(var_id, current_block);
                     } else {
-                        dead_call_extracts.insert(*var_id);
-                        def_blocks.insert(*var_id, current_block);
+                        dead_call_extracts.insert(var_id);
+                        def_blocks.insert(var_id, current_block);
                     }
                 } else if uses == 1 {
-                    if !(matches!(func.exprs.get(*value), HirExpr::Table { .. })
-                        && is_var_used_as_table_target(func, *var_id))
+                    if !(matches!(func.exprs.get(value), HirExpr::Table { .. })
+                        && is_var_used_as_table_target(func, var_id))
                     {
                         // If this VarId has multiple definitions, inlining
                         // would pick the wrong value when the use is only
                         // reached by one of the defs. Skip entirely.
-                        if multi_def.contains(var_id) {
+                        if multi_def.contains(&var_id) {
                             // Already known multi-def — don't add
-                        } else if single_use.contains_key(var_id) {
+                        } else if single_use.contains_key(&var_id) {
                             // Second def encountered — remove and mark as multi-def
-                            single_use.remove(var_id);
-                            multi_def.insert(*var_id);
+                            single_use.remove(&var_id);
+                            multi_def.insert(var_id);
                         } else {
-                            single_use.insert(*var_id, *value);
-                            def_blocks.insert(*var_id, current_block);
+                            single_use.insert(var_id, value);
+                            def_blocks.insert(var_id, current_block);
                         }
                     }
                 }
@@ -276,22 +286,29 @@ fn apply_removals(
     let mut result = Vec::with_capacity(stmts.len());
 
     for stmt in stmts {
-        // Check if this Assign should be removed/transformed
-        if let HirStmt::Assign {
-            target: LValue::Local(var_id),
-            value,
-        } = &stmt
-        {
-            if single_use.contains_key(var_id) || dead_stores.contains(var_id) {
+        // Check if this Assign or LocalDecl should be removed/transformed
+        let removal_candidate = match &stmt {
+            HirStmt::Assign {
+                target: LValue::Local(var_id),
+                value,
+            } => Some((*var_id, *value)),
+            HirStmt::LocalDecl {
+                var,
+                init: Some(value),
+            } => Some((*var, *value)),
+            _ => None,
+        };
+        if let Some((var_id, value)) = removal_candidate {
+            if single_use.contains_key(&var_id) || dead_stores.contains(&var_id) {
                 continue; // Remove
             }
-            if dead_calls.contains(var_id) {
-                result.push(HirStmt::ExprStmt(*value));
+            if dead_calls.contains(&var_id) {
+                result.push(HirStmt::ExprStmt(value));
                 continue;
             }
-            if dead_call_extracts.contains(var_id) {
+            if dead_call_extracts.contains(&var_id) {
                 let mut calls = Vec::new();
-                collect_side_effect_calls(func, *value, &mut calls);
+                collect_side_effect_calls(func, value, &mut calls);
                 if calls.is_empty() {
                     continue; // Remove
                 }
@@ -454,11 +471,19 @@ fn is_fully_removed(
     single_use: &FxHashMap<VarId, ExprId>,
     dead_stores: &FxHashSet<VarId>,
 ) -> bool {
-    if let HirStmt::Assign {
-        target: LValue::Local(var_id),
-        ..
-    } = stmt
-    {
+    let var_id = match stmt {
+        HirStmt::Assign {
+            target: LValue::Local(var_id),
+            ..
+        } => Some(var_id),
+        HirStmt::LocalDecl {
+            var,
+            init: Some(_),
+            ..
+        } => Some(var),
+        _ => None,
+    };
+    if let Some(var_id) = var_id {
         single_use.contains_key(var_id) || dead_stores.contains(var_id)
     } else {
         false
@@ -486,11 +511,19 @@ fn check_sole_body_stmts(
             // Single-use candidates ARE used elsewhere, so keeping the assignment is
             // preferable to emptying the body.
             for stmt in stmts.iter().rev() {
-                if let HirStmt::Assign {
-                    target: LValue::Local(var_id),
-                    ..
-                } = stmt
-                {
+                let var_id = match stmt {
+                    HirStmt::Assign {
+                        target: LValue::Local(var_id),
+                        ..
+                    } => Some(var_id),
+                    HirStmt::LocalDecl {
+                        var,
+                        init: Some(_),
+                        ..
+                    } => Some(var),
+                    _ => None,
+                };
+                if let Some(var_id) = var_id {
                     if single_use.contains_key(var_id) {
                         result.insert(*var_id);
                         break;
