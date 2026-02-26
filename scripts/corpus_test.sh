@@ -21,8 +21,15 @@ done
 TMPDIR_RESULTS=$(mktemp -d)
 MAX_JOBS="${MAX_JOBS:-8}"
 
-# Build first so parallel jobs don't race
+# Build first so parallel jobs use the binary directly (no cargo lock contention)
 cargo build -p lantern-verify 2>&1 | tail -1
+TARGET_DIR="$(cargo metadata --format-version=1 --no-deps 2>/dev/null \
+    | jq -r '.target_directory')"
+VERIFY_BIN="$TARGET_DIR/debug/lantern-verify"
+if [ ! -x "$VERIFY_BIN" ]; then
+    echo "ERROR: binary not found at $VERIFY_BIN" >&2
+    exit 1
+fi
 
 # Collect all jobs: root l64 files + subdirectories
 jobs=()
@@ -34,16 +41,21 @@ for dir in "$SCRIPTS_DIR"/*/; do
     jobs+=("$name|$dir")
 done
 
+run_job() {
+    local name="$1"
+    local target="$2"
+    # shellcheck disable=SC2086
+    "$VERIFY_BIN" roundtrip --format lcov $target \
+        > "$TMPDIR_RESULTS/${name}.lcov" \
+        2> "$TMPDIR_RESULTS/${name}.err" || true
+}
+
 # Run jobs with limited concurrency — each emits LCOV to a temp file
 running=0
 for job in "${jobs[@]}"; do
     name="${job%%|*}"
     target="${job#*|}"
-    (
-        # shellcheck disable=SC2086
-        cargo run -p lantern-verify -- roundtrip --format lcov $target 2>/dev/null \
-            > "$TMPDIR_RESULTS/${name}.lcov" || true
-    ) &
+    run_job "$name" "$target" &
     running=$((running + 1))
     if [ "$running" -ge "$MAX_JOBS" ]; then
         wait -n 2>/dev/null || true
@@ -52,10 +64,47 @@ for job in "${jobs[@]}"; do
 done
 wait
 
-# Merge all LCOV files into one
+# Retry any jobs that produced empty LCOV (panics, stack overflows)
+retried=0
+for job in "${jobs[@]}"; do
+    name="${job%%|*}"
+    target="${job#*|}"
+    lcov_file="$TMPDIR_RESULTS/${name}.lcov"
+    if [ ! -s "$lcov_file" ]; then
+        retried=$((retried + 1))
+        run_job "$name" "$target" &
+        running=$((running + 1))
+        if [ "$running" -ge "$MAX_JOBS" ]; then
+            wait -n 2>/dev/null || true
+            running=$((running - 1))
+        fi
+    fi
+done
+if [ "$retried" -gt 0 ]; then
+    wait
+    echo "(retried $retried failed jobs)" >&2
+fi
+
+# Report any jobs that still failed after retry
+failed_jobs=()
+for job in "${jobs[@]}"; do
+    name="${job%%|*}"
+    lcov_file="$TMPDIR_RESULTS/${name}.lcov"
+    err_file="$TMPDIR_RESULTS/${name}.err"
+    if [ ! -s "$lcov_file" ]; then
+        failed_jobs+=("$name")
+        if [ -s "$err_file" ]; then
+            echo "WARNING: $name failed: $(tail -1 "$err_file")" >&2
+        else
+            echo "WARNING: $name produced no output" >&2
+        fi
+    fi
+done
+
+# Merge all LCOV files into one, stripping SCRIPTS_DIR prefix from SF: lines
 > "$LCOV_PATH"
 for f in "$TMPDIR_RESULTS"/*.lcov; do
-    cat "$f" >> "$LCOV_PATH"
+    [ -s "$f" ] && sed "s|^SF:${SCRIPTS_DIR}|SF:|" "$f" >> "$LCOV_PATH"
 done
 
 # Parse LCOV to build the table: per-folder FNF/FNH sums
@@ -64,13 +113,13 @@ fmt="%-40s %8s %8s %8s %7s\n"
 printf "\n$fmt" "Folder" "Check" "Pass" "Fail" "Rate"
 printf "$fmt" "---" "---" "---" "---" "---"
 
-awk -v scripts_dir="$SCRIPTS_DIR" '
+awk '
 BEGIN {
     total_fnf = 0; total_fnh = 0;
 }
 /^SF:/ {
     path = substr($0, 4)
-    sub("^" scripts_dir "/?", "", path)
+    sub("^/", "", path)
     idx = index(path, "/")
     if (idx > 0) {
         folder = substr(path, 1, idx - 1)
@@ -114,6 +163,9 @@ END {
 ' "$LCOV_PATH"
 
 echo ""
+if [ ${#failed_jobs[@]} -gt 0 ]; then
+    echo "WARNING: ${#failed_jobs[@]} job(s) failed: ${failed_jobs[*]}"
+fi
 echo "LCOV tracefile written to: $LCOV_PATH"
 
 rm -rf "$TMPDIR_RESULTS"
