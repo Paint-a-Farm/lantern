@@ -494,65 +494,57 @@ fn bind_scope_initializers(
             });
             if !already_bound {
                 if let Some(reg_accesses) = by_register.get(&register) {
-                    // Try table constructor pattern: find a table def before scope_start.
-                    'table_search: for access in reg_accesses.iter() {
-                        if access.is_def && access.is_table_def && access.reg.pc < scope_start {
-                            if !def_var_has_named(def_var, func, &access.reg) {
-                                let var_id = get_or_create_scope_var(
-                                    func,
-                                    register,
-                                    scope_name,
-                                    scope_start,
-                                    scope_end,
-                                    Some(access.reg.pc), // Table constructor is the declaration
-                                    def_var,
-                                    use_var,
-                                    accesses,
-                                );
-                                let info = func.vars.get_mut(var_id);
-                                if !info.def_pcs.contains(&access.reg.pc) {
-                                    info.def_pcs.push(access.reg.pc);
-                                }
-                                def_var.insert(access.reg, var_id);
-                                break 'table_search;
-                            }
-                        }
-                    }
-
-                    // Try closure pattern: NewClosure/DupClosure at PC N followed
-                    // by CAPTURE instructions, with scope starting after the last capture.
-                    if !scope_entry_already_bound(
-                        func,
-                        register,
-                        scope_name,
-                        scope_start,
-                        scope_end,
-                        def_var,
-                        use_var,
-                        accesses,
-                    ) {
-                        // Find the CLOSEST closure def before scope_start (highest PC).
-                    // When a register is reused for multiple closures (e.g. R16
-                    // first holds an anonymous callback, then the named function),
-                    // we must pick the one nearest to the scope start.
+                    // Find the closest table def and closest closure def before
+                    // scope_start, then pick whichever is nearest. This prevents
+                    // a table def from stealing a scope that belongs to a later
+                    // closure def on the same register (register reuse).
+                    let mut best_table: Option<&RegAccess> = None;
                     let mut best_closure: Option<&RegAccess> = None;
                     for access in reg_accesses.iter() {
-                        if access.is_def && access.is_closure_def && access.reg.pc < scope_start {
-                            if !def_var_has_named(def_var, func, &access.reg) {
+                        if access.is_def && access.reg.pc < scope_start
+                            && !def_var_has_named(def_var, func, &access.reg)
+                        {
+                            if access.is_table_def {
+                                if best_table.map_or(true, |b| access.reg.pc > b.reg.pc) {
+                                    best_table = Some(access);
+                                }
+                            }
+                            if access.is_closure_def {
                                 if best_closure.map_or(true, |b| access.reg.pc > b.reg.pc) {
                                     best_closure = Some(access);
                                 }
                             }
                         }
                     }
-                    if let Some(access) = best_closure {
+
+                    // Pick the candidate closest to scope_start.
+                    let winner = match (best_table, best_closure) {
+                        (Some(t), Some(c)) => {
+                            if c.reg.pc >= t.reg.pc { Some(c) } else { Some(t) }
+                        }
+                        (Some(t), None) => Some(t),
+                        (None, Some(c)) => {
+                            // Only use closure if the scope isn't already bound
+                            if !scope_entry_already_bound(
+                                func, register, scope_name, scope_start, scope_end,
+                                def_var, use_var, accesses,
+                            ) {
+                                Some(c)
+                            } else {
+                                None
+                            }
+                        }
+                        (None, None) => None,
+                    };
+
+                    if let Some(access) = winner {
                         let var_id = get_or_create_scope_var(
                             func,
                             register,
                             scope_name,
                             scope_start,
                             scope_end,
-                            Some(access.reg.pc), // Closure def is the declaration
+                            Some(access.reg.pc),
                             def_var,
                             use_var,
                             accesses,
@@ -562,7 +554,6 @@ fn bind_scope_initializers(
                             info.def_pcs.push(access.reg.pc);
                         }
                         def_var.insert(access.reg, var_id);
-                    }
                     }
                 }
             }
