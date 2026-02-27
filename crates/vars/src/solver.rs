@@ -4,6 +4,7 @@ use petgraph::Direction;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use lantern_bytecode::scope_tree::ScopeTree;
+use lantern_hir::arena::ExprId;
 use lantern_hir::expr::{CaptureSource, HirExpr};
 use lantern_hir::func::HirFunc;
 use lantern_hir::stmt::{HirStmt, LValue};
@@ -537,6 +538,37 @@ fn bind_scope_initializers(
                         (None, None) => None,
                     };
 
+                    // Reject the candidate if another DEF of the same register
+                    // exists between the candidate PC and scope_start. This
+                    // means the register was reused (e.g., table/closure as a
+                    // call arg, then the register reused for a for-loop var).
+                    let winner = winner.filter(|w| {
+                        !reg_accesses.iter().any(|a| {
+                            a.is_def
+                                && a.reg.pc > w.reg.pc
+                                && a.reg.pc < scope_start
+                        })
+                    });
+
+                    // For closure candidates, also verify the scope starts
+                    // right after the initialization sequence (NewClosure +
+                    // Captures). For-loop implicit defs aren't recorded as
+                    // RegAccess, so the gap check catches those.
+                    let winner = winner.filter(|w| {
+                        if w.is_closure_def {
+                            let num_captures = match func.exprs.get(
+                                find_def_value(func, &w.reg),
+                            ) {
+                                HirExpr::Closure { captures, .. } => captures.len(),
+                                _ => 0,
+                            };
+                            let expected = w.reg.pc + 1 + num_captures;
+                            scope_start <= expected + 1
+                        } else {
+                            true
+                        }
+                    });
+
                     if let Some(access) = winner {
                         let var_id = get_or_create_scope_var(
                             func,
@@ -908,6 +940,20 @@ fn find_node_containing_pc(func: &HirFunc, pc: usize) -> Option<NodeIndex> {
         }
     }
     None
+}
+
+/// Find the expression value assigned to a register def (RegAssign target).
+fn find_def_value(func: &HirFunc, reg: &RegRef) -> ExprId {
+    for node_idx in func.cfg.node_indices() {
+        for stmt in &func.cfg[node_idx].stmts {
+            if let HirStmt::RegAssign { target, value } = stmt {
+                if target.register == reg.register && target.pc == reg.pc {
+                    return *value;
+                }
+            }
+        }
+    }
+    ExprId(0) // fallback — shouldn't happen
 }
 
 /// Check if a def is already bound to a NAMED variable (not an unnamed temp).
