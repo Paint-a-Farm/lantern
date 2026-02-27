@@ -39,6 +39,19 @@ fn resolve_jump_target(func: &HirFunc, start: NodeIndex) -> NodeIndex {
     }
 }
 
+/// Find where a Jump-terminated block ultimately exits to, even if it has
+/// statements.  Unlike `resolve_jump_target` (which only follows *empty*
+/// blocks), this returns the single successor of a Jump block regardless of
+/// whether it has statements.  Returns `None` if the block is not a Jump.
+fn jump_exit_target(func: &HirFunc, node: NodeIndex) -> Option<NodeIndex> {
+    let block = &func.cfg[node];
+    if matches!(block.terminator, Terminator::Jump) {
+        cfg_helpers::single_successor(&func.cfg, node)
+    } else {
+        None
+    }
+}
+
 /// Check if a node is a Branch block (has a Branch terminator).
 fn is_branch_block(func: &HirFunc, node: NodeIndex) -> bool {
     matches!(func.cfg[node].terminator, Terminator::Branch { .. })
@@ -456,6 +469,32 @@ pub(super) fn structure_branch(
                     });
                     return Some(else_n);
                 }
+
+                // Then-branch has statements but exits the loop:
+                //   if cond then <stmts>; break end
+                // This handles blocks like `Logging.warning(...); Jump→exit`
+                // where resolve_jump_target stops because the block isn't empty.
+                if let Some(exit) = lctx.exit {
+                    if Some(then_target) != lctx.exit {
+                        if let Some(jt) = jump_exit_target(func, then_n) {
+                            if jt == exit && !visited.contains(&exit) {
+                                // Structure the then-branch stopping at the exit
+                                // so we don't follow the Jump out of the loop.
+                                let mut then_stmts =
+                                    structure_region(func, then_n, Some(exit), loop_ctx, visited, pdom);
+                                then_stmts.push(HirStmt::Break);
+                                result.push(HirStmt::If {
+                                    condition,
+                                    then_body: then_stmts,
+                                    elseif_clauses: Vec::new(),
+                                    else_body: None,
+                                });
+                                return Some(else_n);
+                            }
+                        }
+                    }
+                }
+
                 // else branch breaks/continues: use `negated` flag from the
                 // original opcode to decide between guard and wrapping forms.
                 //   negated=true  (JumpIfNot*) → wrapping: `if cond then <body> end`
@@ -486,6 +525,29 @@ pub(super) fn structure_branch(
                     }
                     return stop;
                 }
+                // Else-branch has statements but exits the loop.
+                // Mirror of the then-branch case above.
+                if let Some(exit) = lctx.exit {
+                    if Some(else_target) != lctx.exit {
+                        if let Some(jt) = jump_exit_target(func, else_n) {
+                            if jt == exit && !visited.contains(&exit) {
+                                let then_stmts =
+                                    structure_region(func, then_n, stop, loop_ctx, visited, pdom);
+                                let mut else_stmts =
+                                    structure_region(func, else_n, Some(exit), loop_ctx, visited, pdom);
+                                else_stmts.push(HirStmt::Break);
+                                result.push(HirStmt::If {
+                                    condition,
+                                    then_body: then_stmts,
+                                    elseif_clauses: Vec::new(),
+                                    else_body: Some(else_stmts),
+                                });
+                                return stop;
+                            }
+                        }
+                    }
+                }
+
                 if else_target == lctx.header {
                     // Check for empty-else annotation before choosing form.
                     // When the then-body ends with Jump+0, the wrapping form
