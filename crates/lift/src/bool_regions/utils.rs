@@ -194,6 +194,57 @@ pub fn writes_multiple_registers(
     false
 }
 
+/// Find the end PC of a table constructor starting at `start_pc`.
+///
+/// For `NewTable`, the constructor ends at the `SetList` on the same register.
+/// For `DupTable`, the constructor ends after the last `SetTableKS`/`SetTableN`/
+/// `SetTable` that writes to the table register (B field).
+///
+/// Returns `start_pc + 1` if no population instructions are found (empty table).
+fn find_table_ctor_end(
+    instructions: &[Instruction],
+    start_pc: usize,
+    limit: usize,
+    register: u8,
+) -> usize {
+    let is_dup = instructions[start_pc].op == OpCode::DupTable;
+    let mut end = start_pc + 1;
+    for p in (start_pc + 1)..limit {
+        if p >= instructions.len() {
+            break;
+        }
+        let pi = &instructions[p];
+        if pi.op == OpCode::Nop {
+            continue;
+        }
+        if !is_dup {
+            // NewTable: ends at SetList on the register.
+            if pi.op == OpCode::SetList && pi.a == register {
+                return p + 1;
+            }
+        } else {
+            // DupTable: track SetTableKS/SetTableN/SetTable writing to the table.
+            if matches!(pi.op, OpCode::SetTableKS | OpCode::SetTableN | OpCode::SetTable)
+                && pi.b == register
+            {
+                // Include the AUX word after SetTableKS/SetTableN.
+                end = if has_aux_word(pi.op) { p + 2 } else { p + 1 };
+                continue;
+            }
+        }
+        // For both: loads into registers above the table register are element values.
+        if writes_register(pi, pi.a) && pi.a > register {
+            continue;
+        }
+        // Any other instruction means we've left the constructor.
+        if end > start_pc + 1 {
+            return end;
+        }
+        break;
+    }
+    end
+}
+
 /// Check if the instructions in `[from, to)` contain a load into `register`
 /// and no control flow or side effects.
 ///
@@ -211,6 +262,7 @@ pub fn tail_loads_register(
 ) -> bool {
     let mut found_load = false;
     let mut in_table_ctor = false;
+    let mut in_table_ctor_end = 0usize;
     for pc in from..to {
         if pc >= instructions.len() {
             return false;
@@ -218,14 +270,33 @@ pub fn tail_loads_register(
         let insn = &instructions[pc];
 
         // Track table constructor regions on the chain register.
+        // NewTable/DupTable followed by population instructions (SetList for
+        // array elements, SetTableKS/N for named keys) form a table literal.
+        // We find the end of the constructor and skip the entire region.
+        //
+        // Without a population check, `local data = {}` (empty table) would
+        // enter table-ctor mode and skip all subsequent instructions —
+        // including barriers — causing false positives (e.g. Weather:draw).
         if matches!(insn.op, OpCode::NewTable | OpCode::DupTable) && insn.a == register {
-            in_table_ctor = true;
+            let ctor_end = find_table_ctor_end(instructions, pc, to, register);
+            if ctor_end > pc + 1 {
+                // Valid table constructor with population — skip the region.
+                found_load = true;
+                // Jump `pc` forward: the for-loop will increment past the ctor.
+                // We use in_table_ctor with a known end PC via a dedicated skip.
+                // (Simply advance the iterator by setting in_table_ctor_end.)
+                in_table_ctor = true;
+                in_table_ctor_end = ctor_end;
+                continue;
+            }
+            // No population (empty table like `{}`) — treat as plain write.
             found_load = true;
-            continue;
         }
-        if insn.op == OpCode::SetList && insn.a == register {
+        if in_table_ctor {
+            if pc < in_table_ctor_end {
+                continue;
+            }
             in_table_ctor = false;
-            continue;
         }
         if in_table_ctor {
             continue;
