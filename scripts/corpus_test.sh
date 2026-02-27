@@ -9,7 +9,7 @@
 set -euo pipefail
 
 # Parse arguments
-SCRIPTS_DIR="/Users/kim/dev/fs25/dataS/scripts"
+SCRIPTS_DIR="/Users/kim/dev/fs25/dataS_1.16/scripts"
 LCOV_PATH="corpus_roundtrip.lcov"
 COMPARE_MODE="loose"
 while [[ $# -gt 0 ]]; do

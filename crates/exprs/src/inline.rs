@@ -159,17 +159,14 @@ fn find_candidates_in_stmts(
         if let Some((var_id, value)) = candidate {
             let info = func.vars.get(var_id);
             let has_name = info.name.is_some();
-            let is_closure = matches!(func.exprs.get(value), HirExpr::Closure { .. });
             let uses = use_counts.get(&var_id).copied().unwrap_or(0);
 
-
-
-            // Named variables are generally kept (not inlined), except:
-            // - Closures with exactly 1 use can be inlined at the call site,
-            //   but only if that use is an actual Var expression (not a capture).
-            let closure_inlinable = is_closure && uses == 1
-                && has_var_expr_use(func, var_id);
-            if !(has_name && !closure_inlinable) {
+            // Named variables are never inlined — the original source had an
+            // explicit `local name = expr` that we must preserve.  Inlining
+            // named locals (especially closures) into their use site removes
+            // the MOVE instruction the compiler generates for the local,
+            // causing bytecode mismatches.
+            if !has_name {
                 if uses == 0 {
                     if !expr_has_side_effects(func, value) {
                         dead_stores.insert(var_id);
@@ -889,22 +886,6 @@ pub(crate) fn expr_has_side_effects(func: &HirFunc, expr_id: ExprId) -> bool {
         HirExpr::Select { source, .. } => expr_has_side_effects(func, *source),
         _ => false,
     }
-}
-
-/// Check if a variable has at least one `HirExpr::Var(var_id)` use in the
-/// expression arena. This distinguishes vars used in expressions (substitutable
-/// by the inline pass) from vars used only as `CaptureSource::Var` (not
-/// substitutable). Used to prevent inlining closures that are only captured.
-fn has_var_expr_use(func: &HirFunc, var_id: VarId) -> bool {
-    for i in 0..func.exprs.len() {
-        let expr_id = ExprId(i as u32);
-        if let HirExpr::Var(v) = func.exprs.get(expr_id) {
-            if *v == var_id {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 /// Check if a variable is used as the table target of a FieldAccess/IndexAccess
