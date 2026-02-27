@@ -1,11 +1,13 @@
 //! Return-value normalization patterns.
 //!
-//! Two passes that clean up compiler-generated temp variables around return
+//! Three passes that clean up compiler-generated temp variables around return
 //! statements and multi-return calls:
 //!
 //! - **`inline_return_temps`** — `local v = expr; return v` -> `return expr`
 //! - **`collapse_multi_return_temps`** — `local _v1, _v2 = call(); x = _v1; y = _v2`
 //!   -> `x, y = call(...)`
+//! - **`strip_redundant_returns`** — removes bare returns at the end of
+//!   if-branches when a bare return immediately follows the if-statement.
 
 use lantern_hir::expr::HirExpr;
 use lantern_hir::func::HirFunc;
@@ -180,3 +182,119 @@ pub(super) fn collapse_multi_return_temps(func: &HirFunc, mut stmts: Vec<HirStmt
     }
     stmts
 }
+
+// ---------------------------------------------------------------------------
+// Strip redundant returns
+// ---------------------------------------------------------------------------
+
+/// Remove bare `return` statements that are redundant because a bare return
+/// follows immediately after, or because the function ends implicitly.
+///
+/// **Pattern 1** — bare return before sibling return:
+/// ```text
+/// if cond then           if cond then
+///     stuff()                stuff()
+///     return      -->    end
+/// end                    return
+/// return
+/// ```
+///
+/// **Pattern 2** — sole bare return in else at end of statement list:
+/// ```text
+/// if cond then           if cond then
+///     stuff()      -->       stuff()
+/// else                   end
+///     return
+/// end
+/// ```
+pub(super) fn strip_redundant_returns(stmts: &mut Vec<HirStmt>) {
+    // Pattern 2: when the last statement is an if whose else body is just
+    // a bare return (sole statement), drop the else body.
+    if let Some(HirStmt::If {
+        else_body,
+        then_body,
+        elseif_clauses,
+        ..
+    }) = stmts.last_mut()
+    {
+        if let Some(else_stmts) = else_body {
+            if else_stmts.len() == 1
+                && matches!(&else_stmts[0], HirStmt::Return(v) if v.is_empty())
+                && !branch_has_value_return(then_body)
+                && !elseif_clauses.iter().any(|c| branch_has_value_return(&c.body))
+            {
+                *else_body = None;
+            }
+        }
+    }
+
+    // Pattern 1: strip bare returns from if-branches before a sibling return.
+    let len = stmts.len();
+    if len < 2 {
+        return;
+    }
+
+    // Check if the last statement is a bare return — if so, strip bare returns
+    // from the ends of if-branches in the preceding statement.
+    if matches!(stmts.last(), Some(HirStmt::Return(v)) if v.is_empty()) {
+        if let Some(HirStmt::If {
+            then_body,
+            elseif_clauses,
+            else_body,
+            ..
+        }) = stmts.get_mut(len - 2)
+        {
+            strip_trailing_bare_return(then_body);
+            for clause in elseif_clauses.iter_mut() {
+                strip_trailing_bare_return(&mut clause.body);
+            }
+            if let Some(else_body) = else_body {
+                strip_trailing_bare_return(else_body);
+            }
+        }
+    }
+}
+
+/// Strip a trailing bare `return` from a branch body.
+/// Also recurses into nested if-statements at the end of the body.
+fn strip_trailing_bare_return(stmts: &mut Vec<HirStmt>) {
+    if matches!(stmts.last(), Some(HirStmt::Return(v)) if v.is_empty()) {
+        stmts.pop();
+        return;
+    }
+    // Recurse into nested if at end of body
+    if let Some(HirStmt::If {
+        then_body,
+        elseif_clauses,
+        else_body,
+        ..
+    }) = stmts.last_mut()
+    {
+        strip_trailing_bare_return(then_body);
+        for clause in elseif_clauses.iter_mut() {
+            strip_trailing_bare_return(&mut clause.body);
+        }
+        if let Some(else_body) = else_body {
+            strip_trailing_bare_return(else_body);
+        }
+    }
+}
+
+/// Check if a branch body ends with `return <values>` (non-empty return).
+fn branch_has_value_return(stmts: &[HirStmt]) -> bool {
+    match stmts.last() {
+        Some(HirStmt::Return(v)) => !v.is_empty(),
+        Some(HirStmt::If {
+            then_body,
+            elseif_clauses,
+            else_body,
+            ..
+        }) => {
+            branch_has_value_return(then_body)
+                || elseif_clauses.iter().any(|c| branch_has_value_return(&c.body))
+                || else_body.as_ref().is_some_and(|b| branch_has_value_return(b))
+        }
+        _ => false,
+    }
+}
+

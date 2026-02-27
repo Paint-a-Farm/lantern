@@ -22,7 +22,7 @@ use lantern_hir::stmt::{ElseIfClause, HirStmt};
 use compound::merge_compound_conditions;
 use elseif::normalize_inverted_elseif;
 use guards::{absorb_tail_into_else, decompose_guard_chain, flip_elseif_guard, flip_guard_to_wrapper, hoist_else_guards, merge_consecutive_guards};
-use returns::{collapse_multi_return_temps, inline_return_temps};
+use returns::{collapse_multi_return_temps, inline_return_temps, strip_redundant_returns};
 use ternary::fold_ternary_patterns;
 
 /// Apply all post-structuring patterns to the function.
@@ -70,6 +70,10 @@ fn transform_stmts(func: &mut HirFunc, stmts: Vec<HirStmt>, is_top_level: bool) 
     if is_top_level {
         result = absorb_tail_into_else(func, result);
     }
+    // Strip redundant bare returns: when an if-branch ends with bare `return`
+    // and the next statement is also bare `return`, the inner one is redundant.
+    // Also strips sole-bare-return else bodies at end of statement list.
+    strip_redundant_returns(&mut result);
     // Inline `local v = expr; return v` → `return expr`
     result = inline_return_temps(func, result);
     result
