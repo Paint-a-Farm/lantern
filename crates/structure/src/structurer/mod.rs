@@ -9,11 +9,13 @@ mod branch;
 mod cfg_helpers;
 mod guard;
 mod loops;
+pub(crate) mod postdom;
 
 use branch::structure_branch;
 use cfg_helpers::single_successor;
 use guard::strip_trailing_returns;
 use loops::{structure_for_gen, structure_for_num, try_structure_while};
+use postdom::PostDomTree;
 
 /// Structure a function's CFG into nested HirStmt trees.
 ///
@@ -22,7 +24,8 @@ use loops::{structure_for_gen, structure_for_num, try_structure_while};
 /// walks only the entry block's stmts recursively.
 pub fn structure_function(func: &mut HirFunc) {
     let entry = func.entry;
-    let mut stmts = structure_region(func, entry, None, None, &mut FxHashSet::default());
+    let pdom = postdom::compute_postdom_tree(&func.cfg, entry);
+    let mut stmts = structure_region(func, entry, None, None, &mut FxHashSet::default(), &pdom);
     strip_trailing_returns(&mut stmts);
     func.cfg[entry].stmts = stmts;
     func.cfg[entry].terminator = Terminator::None;
@@ -51,6 +54,7 @@ pub(crate) fn structure_region(
     stop: Option<NodeIndex>,
     loop_ctx: Option<&LoopCtx>,
     visited: &mut FxHashSet<NodeIndex>,
+    pdom: &PostDomTree,
 ) -> Vec<HirStmt> {
     let mut result = Vec::new();
     let mut current = Some(start);
@@ -64,7 +68,7 @@ pub(crate) fn structure_region(
         }
 
         // Check if this is a while-loop header
-        if let Some(loop_result) = try_structure_while(func, node, stop, loop_ctx, visited) {
+        if let Some(loop_result) = try_structure_while(func, node, stop, loop_ctx, visited, pdom) {
             result.extend(loop_result.stmts);
             current = loop_result.next;
             continue;
@@ -114,7 +118,7 @@ pub(crate) fn structure_region(
                 let condition = *condition;
                 let negated = *negated;
                 current =
-                    structure_branch(func, node, condition, negated, stop, loop_ctx, visited, &mut result);
+                    structure_branch(func, node, condition, negated, stop, loop_ctx, visited, &mut result, pdom);
             }
 
             Terminator::ForNumPrep {
@@ -141,6 +145,7 @@ pub(crate) fn structure_region(
                     loop_ctx,
                     visited,
                     &mut result,
+                    pdom,
                 );
             }
 
@@ -172,6 +177,7 @@ pub(crate) fn structure_region(
                     loop_ctx,
                     visited,
                     &mut result,
+                    pdom,
                 );
             }
         }

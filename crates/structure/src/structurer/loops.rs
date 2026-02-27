@@ -11,6 +11,7 @@ use lantern_hir::types::LuaValue;
 use lantern_hir::var::VarId;
 
 use super::cfg_helpers::{branch_successors, negate_condition};
+use super::postdom::PostDomTree;
 use super::structure_region;
 use super::LoopCtx;
 use super::LoopResult;
@@ -26,6 +27,7 @@ pub(super) fn try_structure_while(
     stop: Option<NodeIndex>,
     _outer_loop: Option<&LoopCtx>,
     visited: &mut FxHashSet<NodeIndex>,
+    pdom: &PostDomTree,
 ) -> Option<LoopResult> {
     let condition = match &func.cfg[node].terminator {
         Terminator::Branch { condition, .. } => *condition,
@@ -66,7 +68,7 @@ pub(super) fn try_structure_while(
         exit: Some(exit_node),
     };
 
-    let body_stmts = structure_region(func, body_start, Some(node), Some(&loop_ctx), visited);
+    let body_stmts = structure_region(func, body_start, Some(node), Some(&loop_ctx), visited, pdom);
 
     let mut all_stmts = Vec::new();
 
@@ -168,6 +170,7 @@ pub(super) fn structure_for_num(
     _outer_loop: Option<&LoopCtx>,
     visited: &mut FxHashSet<NodeIndex>,
     result: &mut Vec<HirStmt>,
+    pdom: &PostDomTree,
 ) -> Option<NodeIndex> {
     // Find body start (LoopBack) and exit (LoopExit) from the prep block
     let mut body_start = None;
@@ -202,7 +205,7 @@ pub(super) fn structure_for_num(
     };
 
     // Structure the body, stopping before the ForNumBack block
-    let body_stmts = structure_region(func, body_start, back_block, Some(&loop_ctx), visited);
+    let body_stmts = structure_region(func, body_start, back_block, Some(&loop_ctx), visited, pdom);
 
     // Mark the back-edge block as visited so it's not re-processed
     if let Some(back) = back_block {
@@ -239,6 +242,7 @@ pub(super) fn structure_for_gen(
     _outer_loop: Option<&LoopCtx>,
     visited: &mut FxHashSet<NodeIndex>,
     result: &mut Vec<HirStmt>,
+    pdom: &PostDomTree,
 ) -> Option<NodeIndex> {
     // Find body start (LoopBack) and exit (LoopExit) from the ForGenBack block
     let mut body_start = None;
@@ -280,7 +284,7 @@ pub(super) fn structure_for_gen(
     let iterators = try_inline_for_gen_iterators(func, &iterators, result);
 
     // Structure the body, stopping before the ForGenBack node itself (back-edge)
-    let body_stmts = structure_region(func, body_start, Some(node), Some(&loop_ctx), visited);
+    let body_stmts = structure_region(func, body_start, Some(node), Some(&loop_ctx), visited, pdom);
 
     result.push(HirStmt::GenericFor {
         vars,

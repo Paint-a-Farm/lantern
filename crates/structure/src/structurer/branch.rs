@@ -12,6 +12,7 @@ use lantern_hir::types::BinOp;
 
 use super::cfg_helpers::{self, branch_successors, find_join_point, negate_condition};
 use super::guard::{ends_with_exit, is_guard_clause};
+use super::postdom::PostDomTree;
 use super::structure_region;
 use super::LoopCtx;
 
@@ -58,6 +59,7 @@ fn try_or_chain(
     loop_ctx: Option<&LoopCtx>,
     visited: &mut FxHashSet<NodeIndex>,
     result: &mut Vec<HirStmt>,
+    pdom: &PostDomTree,
 ) -> Option<Option<NodeIndex>> {
     // Find the shared body node by walking the first AND sub-chain.
     let body_node = find_or_chain_body(func, node)?;
@@ -275,7 +277,7 @@ fn try_or_chain(
     }
 
     // Structure the body.
-    let body_stmts = structure_region(func, body_node, join_node, loop_ctx, visited);
+    let body_stmts = structure_region(func, body_node, join_node, loop_ctx, visited, pdom);
 
     // Emit the combined if-statement.
     result.push(HirStmt::If {
@@ -415,9 +417,10 @@ pub(super) fn structure_branch(
     loop_ctx: Option<&LoopCtx>,
     visited: &mut FxHashSet<NodeIndex>,
     result: &mut Vec<HirStmt>,
+    pdom: &PostDomTree,
 ) -> Option<NodeIndex> {
     // Try to detect and structure an or-chain before normal branch processing.
-    if let Some(next) = try_or_chain(func, _node, condition, stop, loop_ctx, visited, result) {
+    if let Some(next) = try_or_chain(func, _node, condition, stop, loop_ctx, visited, result, pdom) {
         return next;
     }
 
@@ -461,7 +464,7 @@ pub(super) fn structure_branch(
                     if negated {
                         // Wrapping form: `if cond then <body> end`
                         let then_stmts =
-                            structure_region(func, then_n, stop, loop_ctx, visited);
+                            structure_region(func, then_n, stop, loop_ctx, visited, pdom);
                         result.push(HirStmt::If {
                             condition,
                             then_body: then_stmts,
@@ -478,7 +481,7 @@ pub(super) fn structure_branch(
                             else_body: None,
                         });
                         let then_stmts =
-                            structure_region(func, then_n, stop, loop_ctx, visited);
+                            structure_region(func, then_n, stop, loop_ctx, visited, pdom);
                         result.extend(then_stmts);
                     }
                     return stop;
@@ -492,7 +495,7 @@ pub(super) fn structure_branch(
                     if negated || has_empty_else {
                         // Wrapping form: `if cond then <body> end`
                         let then_stmts =
-                            structure_region(func, then_n, stop, loop_ctx, visited);
+                            structure_region(func, then_n, stop, loop_ctx, visited, pdom);
                         result.push(HirStmt::If {
                             condition,
                             then_body: then_stmts,
@@ -509,15 +512,26 @@ pub(super) fn structure_branch(
                             else_body: None,
                         });
                         let then_stmts =
-                            structure_region(func, then_n, stop, loop_ctx, visited);
+                            structure_region(func, then_n, stop, loop_ctx, visited, pdom);
                         result.extend(then_stmts);
                     }
                     return stop;
                 }
             }
 
-            // Find the join point (where both branches converge)
-            let join = find_join_point(func, then_n, else_n, stop, visited);
+            // Find the join point via IPDOM — the immediate post-dominator
+            // of the Branch node is where both branches must converge.
+            // If the IPDOM falls at or beyond the outer stop, clamp to None
+            // so the branch structures up to stop instead.
+            //
+            // Fall back to the reachability-based heuristic when IPDOM
+            // returns None (e.g. both branches terminate via Return —
+            // there is no post-dominator, but a shared "sunk return"
+            // block may still serve as the join point).
+            let join = pdom
+                .ipdom(_node)
+                .filter(|&j| Some(j) != stop)
+                .or_else(|| find_join_point(func, then_n, else_n, stop, visited));
 
             // Fix for asymmetric returns: if join is None, check if one
             // branch always returns and the other continues.
@@ -542,7 +556,7 @@ pub(super) fn structure_branch(
             // been visited, making structure_region return empty.
             if join.is_none() && then_returns && !else_returns {
                 // then always returns → `if cond then <return> end; <continue from else>`
-                let then_stmts = collect_return_stmts(func, then_n, stop, loop_ctx, visited);
+                let then_stmts = collect_return_stmts(func, then_n, stop, loop_ctx, visited, pdom);
                 if !then_stmts.is_empty() {
                     result.push(HirStmt::If {
                         condition,
@@ -557,10 +571,10 @@ pub(super) fn structure_branch(
                 // else always returns → structure then-body inline, emit
                 // `if cond then <then_body> else <return> end` preserving
                 // the original branch polarity (avoids JumpIf↔JumpIfNot swaps).
-                let else_stmts = collect_return_stmts(func, else_n, stop, loop_ctx, visited);
+                let else_stmts = collect_return_stmts(func, else_n, stop, loop_ctx, visited, pdom);
                 if !else_stmts.is_empty() {
                     let then_stmts =
-                        structure_region(func, then_n, stop, loop_ctx, visited);
+                        structure_region(func, then_n, stop, loop_ctx, visited, pdom);
                     result.push(HirStmt::If {
                         condition,
                         then_body: then_stmts,
@@ -572,8 +586,8 @@ pub(super) fn structure_branch(
             }
 
             let branch_stop = effective_join.or(stop);
-            let mut then_stmts = structure_region(func, then_n, branch_stop, loop_ctx, visited);
-            let mut else_stmts = structure_region(func, else_n, branch_stop, loop_ctx, visited);
+            let mut then_stmts = structure_region(func, then_n, branch_stop, loop_ctx, visited, pdom);
+            let mut else_stmts = structure_region(func, else_n, branch_stop, loop_ctx, visited, pdom);
 
             // When a branch targets a shared Return node that was already
             // visited by an earlier branch, structure_region returns empty.
@@ -669,7 +683,7 @@ pub(super) fn structure_branch(
             effective_join
         }
         (Some(then_n), None) => {
-            let then_stmts = structure_region(func, then_n, stop, loop_ctx, visited);
+            let then_stmts = structure_region(func, then_n, stop, loop_ctx, visited, pdom);
             result.push(HirStmt::If {
                 condition,
                 then_body: then_stmts,
@@ -750,10 +764,11 @@ fn collect_return_stmts(
     stop: Option<NodeIndex>,
     loop_ctx: Option<&LoopCtx>,
     visited: &mut FxHashSet<NodeIndex>,
+    pdom: &PostDomTree,
 ) -> Vec<HirStmt> {
     // First, try normal structuring — this works when the return node
     // hasn't been visited yet.
-    let stmts = structure_region(func, start, stop, loop_ctx, visited);
+    let stmts = structure_region(func, start, stop, loop_ctx, visited, pdom);
     if !stmts.is_empty() {
         return stmts;
     }
