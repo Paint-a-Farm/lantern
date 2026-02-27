@@ -106,9 +106,9 @@ pub(super) fn inline_return_temps(func: &HirFunc, mut stmts: Vec<HirStmt>) -> Ve
 /// Pattern:
 /// ```text
 /// local _v1, _v2, _v3 = call(...)   -- MultiAssign with unnamed temps
-/// x = _v1                           -- (or local x = _v1)
+/// x = _v1                           -- assignments may be in any order
+/// z = _v3                           -- and target any LValue (field, global, etc.)
 /// y = _v2
-/// z = _v3
 /// ```
 ///
 /// Transforms into:
@@ -117,26 +117,31 @@ pub(super) fn inline_return_temps(func: &HirFunc, mut stmts: Vec<HirStmt>) -> Ve
 /// ```
 ///
 /// Only applies when ALL temp variables are unnamed and each is used exactly
-/// once in the immediately following assign statements.
+/// once in the immediately following assign statements.  The assignments may
+/// appear in any order — we map each temp back to its position.
 pub(super) fn collapse_multi_return_temps(func: &HirFunc, mut stmts: Vec<HirStmt>) -> Vec<HirStmt> {
     let mut i = 0;
     while i < stmts.len() {
         if let HirStmt::MultiAssign { targets, values } = &stmts[i] {
             let n = targets.len();
 
-            // All targets must be unnamed temp variables
-            let all_unnamed = targets.iter().all(|t| {
-                if let LValue::Local(var_id) = t {
-                    func.vars.get(*var_id).name.is_none()
-                } else {
-                    false
-                }
-            });
+            // All targets must be unnamed temp variables — collect their VarIds
+            let temp_vars: Vec<_> = targets
+                .iter()
+                .filter_map(|t| {
+                    if let LValue::Local(var_id) = t {
+                        if func.vars.get(*var_id).name.is_none() {
+                            return Some(*var_id);
+                        }
+                    }
+                    None
+                })
+                .collect();
 
-            if all_unnamed && i + n < stmts.len() {
-                // Next N statements must be `Assign { target: real_var, value: Var(temp) }`
-                // where each temp matches the corresponding MultiAssign target
-                let mut real_targets = Vec::with_capacity(n);
+            if temp_vars.len() == n && i + n < stmts.len() {
+                // Next N statements must each be `Assign { target: X, value: Var(temp) }`
+                // where temp is one of the MultiAssign temps.  Order may differ.
+                let mut real_targets: Vec<Option<LValue>> = vec![None; n];
                 let mut all_match = true;
 
                 for j in 0..n {
@@ -145,10 +150,10 @@ pub(super) fn collapse_multi_return_temps(func: &HirFunc, mut stmts: Vec<HirStmt
                         value,
                     } = &stmts[i + 1 + j]
                     {
-                        if let LValue::Local(temp_var) = &targets[j] {
-                            if let HirExpr::Var(used_var) = func.exprs.get(*value) {
-                                if used_var == temp_var {
-                                    real_targets.push(real_target.clone());
+                        if let HirExpr::Var(used_var) = func.exprs.get(*value) {
+                            if let Some(pos) = temp_vars.iter().position(|v| v == used_var) {
+                                if real_targets[pos].is_none() {
+                                    real_targets[pos] = Some(real_target.clone());
                                     continue;
                                 }
                             }
@@ -158,15 +163,14 @@ pub(super) fn collapse_multi_return_temps(func: &HirFunc, mut stmts: Vec<HirStmt
                     break;
                 }
 
-                if all_match {
+                if all_match && real_targets.iter().all(|t| t.is_some()) {
                     let values = values.clone();
+                    let targets: Vec<LValue> =
+                        real_targets.into_iter().map(|t| t.unwrap()).collect();
                     for _ in 0..n {
                         stmts.remove(i + 1);
                     }
-                    stmts[i] = HirStmt::MultiAssign {
-                        targets: real_targets,
-                        values,
-                    };
+                    stmts[i] = HirStmt::MultiAssign { targets, values };
                     i += 1;
                     continue;
                 }

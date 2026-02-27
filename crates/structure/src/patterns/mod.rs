@@ -57,6 +57,9 @@ fn transform_stmts(func: &mut HirFunc, stmts: Vec<HirStmt>, is_top_level: bool) 
     }
     // Fold ternary patterns: `x = b; if cond then x = a end` → `x = cond and a or b`
     result = fold_ternary_patterns(func, result);
+    // Collapse multi-return temps BEFORE guard flips, because flip_guard_to_wrapper
+    // absorbs tail statements into if bodies — those wouldn't be visited again.
+    result = collapse_multi_return_temps(func, result);
     // Merge consecutive early-exit guards (if cond then continue/break end)
     result = merge_consecutive_guards(func, result);
     // Flip single early-exit guards into wrapping if-then blocks
@@ -69,8 +72,6 @@ fn transform_stmts(func: &mut HirFunc, stmts: Vec<HirStmt>, is_top_level: bool) 
     }
     // Inline `local v = expr; return v` → `return expr`
     result = inline_return_temps(func, result);
-    // Collapse `local _v1, _v2 = call(); x = _v1; y = _v2` → `x, y = call()`
-    result = collapse_multi_return_temps(func, result);
     result
 }
 
