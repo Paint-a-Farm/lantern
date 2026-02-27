@@ -31,19 +31,21 @@ lantern --dump script.l64
 Lua source ◄─ Format ◄─ Emit ◄─ Patterns ◄─ Structure ◄───┘
 ```
 
-Lantern processes bytecode through nine crates, each handling a distinct phase:
+Lantern processes bytecode through eleven crates, each handling a distinct phase:
 
-| Crate       | Purpose                                                                        |
-| ----------- | ------------------------------------------------------------------------------ |
-| `bytecode`  | Parse encrypted `.l64` files into instructions, constants, and debug info      |
-| `hir`       | Core intermediate representation — flat expression arena, variable table, CFG  |
-| `lift`      | Translate bytecode opcodes to HIR; detect boolean value computation patterns   |
-| `vars`      | Constraint-based variable recovery using debug scopes as hard boundaries       |
-| `exprs`     | Eliminate temporaries, fold table constructors, inline branch-local vars       |
-| `structure` | Collapse flat CFG into nested if/while/for/repeat control flow                 |
-| `patterns`  | Post-structuring transforms: compound conditions, guard clauses, elseif chains |
-| `emit`      | Recursive descent Lua source generation with operator precedence               |
-| `cli`       | Command-line interface, batch processing, timing                               |
+| Crate       | Purpose                                                                         |
+| ----------- | ------------------------------------------------------------------------------- |
+| `bytecode`  | Parse encrypted `.l64` files into instructions, constants, and debug info       |
+| `hir`       | Core intermediate representation — flat expression arena, variable table, CFG   |
+| `lift`      | Translate bytecode opcodes to HIR; detect boolean value computation patterns    |
+| `vars`      | Constraint-based variable recovery using debug scopes as hard boundaries        |
+| `exprs`     | Split multi-def temps, eliminate temporaries, fold tables, inline branch-locals |
+| `structure` | Collapse flat CFG into nested if/while/for/repeat control flow                  |
+| `patterns`  | Post-structuring transforms: compound conditions, guard clauses, elseif chains  |
+| `emit`      | Recursive descent Lua source generation with operator precedence                |
+| `lantern`   | Library crate — wires the full pipeline together for embedding in other tools   |
+| `verify`    | Roundtrip verification: decompile → recompile → bytecode comparison             |
+| `cli`       | Command-line interface, batch processing, timing                                |
 
 ### Key Design Decisions
 
@@ -90,8 +92,9 @@ This eliminates the "kioskMode bug" — where medal's SSA incorrectly merges a n
 
 ### 4. Expression Optimization
 
-Four passes, run twice (before and after structuring):
+Five passes, run twice (before and after structuring):
 
+- **Multi-def temp splitting**: The Luau compiler reuses registers for sequential temporaries, causing the var solver to merge them into one multi-def VarId. This pass splits each def into a fresh single-def variable, making them eligible for inlining.
 - **Temporary elimination**: Single-def, single-use, unnamed variables → inline the expression. O(1) arena substitution.
 - **Multi-return collapse**: `local _v1, _v2 = call(); x = _v1; y = _v2` → `x, y = call()`
 - **Table constructor folding**: `local t = {}; t[1] = x; t.name = y` → `local t = {x, name = y}`
@@ -145,55 +148,25 @@ Both lantern and medal target Luau bytecode decompilation. Medal is a mature, ge
 | **Temp elimination**   | ~800 lines of heuristics  | Simple criteria (1 def, 1 use, no name) |
 | **Rust toolchain**     | Nightly (required)        | Stable                                  |
 | **Bytecode versions**  | 3, 4, 5, 6                | 6 only                                  |
-| **Codebase size**      | ~15k lines, 7 crates      | ~12k lines, 9 crates                    |
+| **Codebase size**      | ~15k lines, 7 crates      | ~25k lines, 11 crates                   |
 
 ### What Medal Does Better
 
 - **Broader version support**: Medal handles Luau versions 3-6 and has a Lua 5.1 backend. Lantern only supports version 6.
-- **Control flow structuring maturity**: Medal's iterative structuring with SSA phi-function handling produces cleaner control flow in some complex branching patterns, particularly multi-way branches that Lantern currently duplicates across if/else arms.
 - **Web interface**: Medal includes a Cloudflare Workers crate for browser-based decompilation.
 - **Multi-return scoping**: Medal correctly scopes `local r, g, b, a` declarations inside branches where they're used. Lantern sometimes hoists these to function scope.
 
 ### What Lantern Does Better
 
 - **No identity bugs**: The constraint solver respects debug scope boundaries as hard constraints. Register reuse across scopes (the "kioskMode bug") is impossible by construction.
-- **Fewer unnamed temporaries**: Branch-local inlining eliminates temps that medal's global use-count analysis misses. Across the full FS25 corpus: 125 remaining `local _v = nil` vs medal's ~152 unnamed temps.
+- **Fewer unnamed temporaries**: Multi-def splitting, branch-local inlining, and multi-return collapse eliminate temps that medal's global use-count analysis misses. Across the full FS25 corpus: 6 remaining `local _v = nil` declarations and ~330 total unnamed temp variables.
 - **Syntactically valid output**: 0 SyntaxErrors across all FS25 scripts. Medal produces a handful of syntax issues in complex files.
-- **Simpler codebase**: No Arc/Mutex, no nightly Rust, no SSA construction/destruction phases. Easier to understand and extend.
+- **Simpler internals**: No Arc/Mutex, no nightly Rust, no SSA construction/destruction phases. Easier to understand and extend despite the larger codebase.
 - **Faster builds**: Stable Rust, fewer dependencies, no nightly feature gates. Debug builds complete in <1 second incremental.
 
 ### Output Comparison
 
-Both decompilers produce near-identical output for straightforward code. Differences emerge in complex functions with register reuse across branches.
-
-**Simple function — both produce identical output:**
-
-```lua
-function ColorPickButtonElement:loadFromXML(xmlFile, key)
-    ColorPickButtonElement:superClass().loadFromXML(self, xmlFile, key)
-    self.selectionFrameThickness = GuiUtils.getNormalizedScreenValues(
-        getXMLString(xmlFile, key .. "#selectionFrameThickness"),
-        self.selectionFrameThickness
-    )
-end
-```
-
-**Complex branching — medal wins on control flow:**
-
-```lua
--- Medal: clean compound condition
-if self:getIsSelected() or self:getIsFocused() then
-    GuiOverlay.renderOverlay(self.overlay, ...)
-else
-    GuiOverlay.renderOverlay(self.overlay, ...)
-end
-
--- Lantern: duplicates branch bodies (structuring limitation)
-if not self:getIsSelected() then
-    GuiOverlay.renderOverlay(self.overlay, ...)
-end
-GuiOverlay.renderOverlay(self.overlay, ...)
-```
+Both decompilers produce near-identical output for straightforward code. Differences emerge in complex functions with register reuse across scopes.
 
 **Register reuse — lantern wins on correctness:**
 
@@ -207,6 +180,17 @@ local farmId = g_farmManager:getFarmByUserId(userId)
 local kioskMode = g_gameSettings:getValue(GameSettings.SETTING.KIOSK_MODE)
 -- ... later ...
 kioskMode = g_farmManager:getFarmByUserId(userId)  -- wrong!
+```
+
+**Temp elimination — lantern wins on readability:**
+
+```lua
+-- Lantern: inlines sequential temporaries
+if not hasXMLProperty(xmlFile, key) then break end
+
+-- Medal: preserves compiler temporaries
+local _v8 = hasXMLProperty(xmlFile, key)
+if not _v8 then break end
 ```
 
 ## CLI Reference
@@ -244,6 +228,12 @@ lantern --dump SomeScript.l64
 
 # Debug: see HIR before structuring
 lantern --raw --emit 0 SomeScript.l64
+
+# Roundtrip verification (single file)
+cargo run -p lantern-verify -- roundtrip script.l64
+
+# Roundtrip verification (entire corpus)
+cargo run -p lantern-verify -- roundtrip /path/to/scripts/
 ```
 
 ## Building
@@ -257,17 +247,17 @@ cargo build --release  # optimized build
 
 ## Project Status
 
-Lantern successfully decompiles all script files in the FS25 base game. Output quality metrics across the full corpus:
+Lantern successfully decompiles all 30,315 functions across the FS25 base game. Output quality metrics:
 
-- **SyntaxErrors** (via luau-analyze): 0
-- **Remaining nil-initialized temps** (`local _v = nil`): 125
+- **Syntax errors** (via luau-analyze): 0
+- **Roundtrip match rate**: 93.1% (decompile → recompile produces identical bytecode)
+- **Nil-initialized temps** (`local _v = nil`): 6
+- **Total unnamed temp declarations**: ~330
 - **Empty if-then-end blocks**: 0
-- **Total unnamed temporaries**: ~1,100
 
 Areas of active development:
 
-- Multi-way branch structuring (reducing code duplication in if/else arms)
-- Further temp elimination for cross-branch register reuse patterns
+- Inlined function reconstruction (Luau compiler inlines small local functions)
 - For-loop bound variable scoping
 
 ## License
