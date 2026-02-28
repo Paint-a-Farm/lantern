@@ -210,11 +210,25 @@ fn try_or_chain(
         }
     }
 
-    // If we didn't find the join via chain walking, find it from the body block
-    // or from the last clause's skip target.
+    // Determine the true join point via IPDOM of the or-chain root.
+    // The walked join_node may actually be an else-body with real content
+    // (e.g. an error logging path), not a convergence point.
+    let ipdom_join = pdom.ipdom(node);
+
+    // If we didn't find the join via chain walking, use IPDOM or body successor.
     if join_node.is_none() {
-        join_node = cfg_helpers::single_successor(&func.cfg, body_node);
+        join_node = ipdom_join
+            .or_else(|| cfg_helpers::single_successor(&func.cfg, body_node));
     }
+
+    // If the walked join_node has content and differs from the IPDOM join,
+    // it's an else-body, not a join point. Use the IPDOM as the true join.
+    let (else_node, true_join) = match (join_node, ipdom_join) {
+        (Some(walked), Some(ipdom)) if walked != ipdom && has_block_content(func, walked) => {
+            (Some(walked), Some(ipdom))
+        }
+        _ => (None, join_node),
+    };
 
     // Build the combined condition from collected clause data.
     let mut or_parts: Vec<ExprId> = Vec::new();
@@ -289,8 +303,15 @@ fn try_or_chain(
         result.extend(block_stmts);
     }
 
-    // Structure the body.
-    let body_stmts = structure_region(func, body_node, join_node, loop_ctx, visited, pdom);
+    // Structure the body, stopping at the true join.
+    let body_stmts = structure_region(func, body_node, true_join, loop_ctx, visited, pdom);
+
+    // If the walked join was actually an else-body, structure it too.
+    let else_stmts = if let Some(else_n) = else_node {
+        Some(structure_region(func, else_n, true_join, loop_ctx, visited, pdom))
+    } else {
+        None
+    };
 
     // Emit the combined if-statement.
     result.push(HirStmt::If {
@@ -298,10 +319,10 @@ fn try_or_chain(
         negated: true,
         then_body: body_stmts,
         elseif_clauses: Vec::new(),
-        else_body: None,
+        else_body: else_stmts,
     });
 
-    Some(join_node)
+    Some(true_join)
 }
 
 /// Find the body node for an or-chain starting at `node`.
