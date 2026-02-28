@@ -13,6 +13,7 @@ mod compound;
 mod conditions;
 mod elseif;
 mod guards;
+mod phinode;
 mod returns;
 mod ternary;
 
@@ -22,6 +23,7 @@ use lantern_hir::stmt::{ElseIfClause, HirStmt};
 use compound::merge_compound_conditions;
 use elseif::normalize_inverted_elseif;
 use guards::{absorb_tail_into_else, decompose_guard_chain, flip_elseif_guard, flip_guard_to_wrapper, hoist_else_guards, merge_consecutive_guards};
+use phinode::fold_phinode_returns;
 use returns::{collapse_multi_return_temps, inline_return_temps, strip_redundant_returns};
 use ternary::fold_ternary_patterns;
 
@@ -57,6 +59,10 @@ fn transform_stmts(func: &mut HirFunc, stmts: Vec<HirStmt>, is_top_level: bool) 
     }
     // Fold ternary patterns: `x = b; if cond then x = a end` → `x = cond and a or b`
     result = fold_ternary_patterns(func, result);
+    // Fold phi-node patterns into early returns:
+    // `local _v = default; if cond then _v = val end; return _v`
+    // → `if not cond then return default end; return val`
+    result = fold_phinode_returns(func, result);
     // Collapse multi-return temps BEFORE guard flips, because flip_guard_to_wrapper
     // absorbs tail statements into if bodies — those wouldn't be visited again.
     result = collapse_multi_return_temps(func, result);
