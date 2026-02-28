@@ -583,8 +583,8 @@ pub(super) fn structure_branch(
 
             // Find the join point via IPDOM — the immediate post-dominator
             // of the Branch node is where both branches must converge.
-            // If the IPDOM falls at or beyond the outer stop, clamp to None
-            // so the branch structures up to stop instead.
+            // When IPDOM equals the outer stop, that's correct: the branch
+            // fills the region up to stop and the caller continues from there.
             //
             // Fall back to the reachability-based heuristic when IPDOM
             // returns None (e.g. both branches terminate via Return —
@@ -592,7 +592,6 @@ pub(super) fn structure_branch(
             // block may still serve as the join point).
             let join = pdom
                 .ipdom(_node)
-                .filter(|&j| Some(j) != stop)
                 .or_else(|| find_join_point(func, then_n, else_n, stop, visited));
 
             // Fix for asymmetric returns: if join is None, check if one
