@@ -323,6 +323,7 @@ fn apply_removals(
                 then_body,
                 elseif_clauses,
                 else_body,
+                negated,
             } => {
                 let then_body = apply_removals(
                     then_body,
@@ -361,6 +362,7 @@ fn apply_removals(
                     then_body,
                     elseif_clauses,
                     else_body,
+                    negated,
                 }
             }
             HirStmt::While { condition, body } => {
@@ -640,6 +642,7 @@ fn collect_stmt_expr_ids(stmts: &[HirStmt], out: &mut Vec<ExprId>) {
                 then_body,
                 elseif_clauses,
                 else_body,
+                ..
             } => {
                 out.push(*condition);
                 collect_stmt_expr_ids(then_body, out);

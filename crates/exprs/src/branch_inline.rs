@@ -324,6 +324,7 @@ fn find_var_uses_in_stmt(
             then_body,
             elseif_clauses,
             else_body,
+            ..
         } => {
             find_var_uses_in_expr(exprs, *condition, target, &mut out);
             // Also search nested bodies — use might be inside a nested if

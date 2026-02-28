@@ -24,6 +24,7 @@
 //! end
 //! ```
 
+use lantern_hir::arena::ExprId;
 use lantern_hir::expr::HirExpr;
 use lantern_hir::func::HirFunc;
 use lantern_hir::stmt::{ElseIfClause, HirStmt};
@@ -34,7 +35,7 @@ use super::conditions::negate_condition;
 /// Check if negating a condition would be "clean" — either removing an existing
 /// `not` wrapper or inverting a comparison operator — without adding a `not()`
 /// wrapper that would change the emitted bytecode.
-fn is_cleanly_negatable(func: &HirFunc, condition: lantern_hir::arena::ExprId) -> bool {
+fn is_cleanly_negatable(func: &HirFunc, condition: ExprId) -> bool {
     match func.exprs.get(condition) {
         HirExpr::Unary {
             op: UnOp::Not, ..
@@ -52,6 +53,13 @@ fn is_cleanly_negatable(func: &HirFunc, condition: lantern_hir::arena::ExprId) -
     }
 }
 
+/// Check if a condition can be safely inverted given its bytecode polarity.
+/// negated=false → guard form: condition already has not()/inverted comparison → safe
+/// negated=true → wrapping form: only safe if cleanly negatable
+fn can_invert_condition(func: &HirFunc, condition: ExprId, negated: bool) -> bool {
+    !negated || is_cleanly_negatable(func, condition)
+}
+
 /// Normalize inverted elseif chains.
 ///
 /// Detection: `then_body` is a single If with no `elseif_clauses` and an
@@ -63,6 +71,7 @@ pub(super) fn normalize_inverted_elseif(func: &mut HirFunc, stmt: HirStmt) -> Hi
 fn normalize_inverted_elseif_inner(func: &mut HirFunc, stmt: HirStmt, in_chain: bool) -> HirStmt {
     let HirStmt::If {
         condition,
+        negated,
         then_body,
         elseif_clauses,
         else_body,
@@ -75,6 +84,7 @@ fn normalize_inverted_elseif_inner(func: &mut HirFunc, stmt: HirStmt, in_chain: 
     if !elseif_clauses.is_empty() || else_body.is_none() {
         return HirStmt::If {
             condition,
+            negated,
             then_body,
             elseif_clauses,
             else_body,
@@ -89,45 +99,63 @@ fn normalize_inverted_elseif_inner(func: &mut HirFunc, stmt: HirStmt, in_chain: 
         && matches!(&then_body[0], HirStmt::If { else_body: Some(_), elseif_clauses, .. } if elseif_clauses.is_empty());
     let else_body = else_body.unwrap();
 
-    // Only apply the inversion when the condition can be cleanly negated
-    // (comparison inversion or `not` removal). Adding a `not()` wrapper would
-    // change the bytecode from JumpIfNot to JumpIf, breaking roundtrip fidelity.
-    if is_chain && !in_chain && !is_cleanly_negatable(func, condition) {
-        return HirStmt::If {
-            condition,
-            then_body,
-            elseif_clauses: Vec::new(),
-            else_body: Some(else_body),
-        };
-    }
-
     if !is_chain {
         if in_chain {
-            // Leaf of an inverted chain: invert condition, swap bodies
-            let inv_condition = negate_condition(func, condition);
+            // Leaf of an inverted chain. Try to invert if safe, otherwise
+            // keep the condition and bodies as-is from the structurer.
+            //
+            // When kept as-is, the condition and bodies are in the correct
+            // positions because the structurer already accounts for branch
+            // polarity. The un-inverted condition compiles to the same opcode
+            // (JumpIfNot for both `if cond then` and `elseif cond then`).
+            if can_invert_condition(func, condition, negated) {
+                let inv_condition = negate_condition(func, condition);
+                return HirStmt::If {
+                    condition: inv_condition,
+                    negated: true, // wrapping form after inversion
+                    then_body: else_body,
+                    elseif_clauses: Vec::new(),
+                    else_body: Some(then_body),
+                };
+            }
+            // Keep as-is — bodies stay in structurer order
             return HirStmt::If {
-                condition: inv_condition,
-                then_body: else_body,
+                condition,
+                negated,
+                then_body,
                 elseif_clauses: Vec::new(),
-                else_body: Some(then_body),
+                else_body: Some(else_body),
             };
         }
         // Not in a chain context — leave as-is
         return HirStmt::If {
             condition,
+            negated,
             then_body,
             elseif_clauses: Vec::new(),
             else_body: Some(else_body),
         };
     }
 
-    // Invert the outer condition: the else_body becomes the then_body
+    // We're at a chain node (not a leaf). The condition will be inverted.
+    // Guard: only proceed if the condition can be cleanly inverted.
+    if !can_invert_condition(func, condition, negated) {
+        return HirStmt::If {
+            condition,
+            negated,
+            then_body,
+            elseif_clauses: Vec::new(),
+            else_body: Some(else_body),
+        };
+    }
+
     let inv_condition = negate_condition(func, condition);
 
     // The inner If becomes the elseif chain
     let inner_if = then_body.into_iter().next().unwrap();
     let HirStmt::If {
         condition: inner_cond,
+        negated: inner_negated,
         then_body: inner_then,
         elseif_clauses: inner_elseif,
         else_body: inner_else,
@@ -143,6 +171,7 @@ fn normalize_inverted_elseif_inner(func: &mut HirFunc, stmt: HirStmt, in_chain: 
         func,
         HirStmt::If {
             condition: inner_cond,
+            negated: inner_negated,
             then_body: inner_then,
             elseif_clauses: inner_elseif,
             else_body: inner_else,
@@ -153,6 +182,7 @@ fn normalize_inverted_elseif_inner(func: &mut HirFunc, stmt: HirStmt, in_chain: 
     // Extract the chain from the normalized inner
     if let HirStmt::If {
         condition: norm_cond,
+        negated: _,
         then_body: norm_then,
         elseif_clauses: norm_elseif,
         else_body: norm_else,
@@ -166,6 +196,7 @@ fn normalize_inverted_elseif_inner(func: &mut HirFunc, stmt: HirStmt, in_chain: 
 
         HirStmt::If {
             condition: inv_condition,
+            negated: true, // inverted outer condition → wrapping form
             then_body: else_body,
             elseif_clauses: clauses,
             else_body: norm_else,

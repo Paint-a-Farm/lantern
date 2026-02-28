@@ -337,6 +337,7 @@ fn recurse_into_bodies(stmt: HirStmt, func: &mut HirFunc) -> HirStmt {
             then_body,
             elseif_clauses,
             else_body,
+            negated,
         } => {
             let then_body = split_stmts(then_body, func);
             let elseif_clauses = elseif_clauses
@@ -352,6 +353,7 @@ fn recurse_into_bodies(stmt: HirStmt, func: &mut HirFunc) -> HirStmt {
                 then_body,
                 elseif_clauses,
                 else_body,
+                negated,
             }
         }
         HirStmt::While { condition, body } => {

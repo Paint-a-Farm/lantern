@@ -295,6 +295,7 @@ fn try_or_chain(
     // Emit the combined if-statement.
     result.push(HirStmt::If {
         condition: combined,
+        negated: true,
         then_body: body_stmts,
         elseif_clauses: Vec::new(),
         else_body: None,
@@ -453,6 +454,7 @@ pub(super) fn structure_branch(
                 if Some(then_target) == lctx.exit && !visited.contains(&then_target) {
                     result.push(HirStmt::If {
                         condition,
+                        negated,
                         then_body: vec![HirStmt::Break],
                         elseif_clauses: Vec::new(),
                         else_body: None,
@@ -463,6 +465,7 @@ pub(super) fn structure_branch(
                 if then_target == lctx.header {
                     result.push(HirStmt::If {
                         condition,
+                        negated,
                         then_body: vec![HirStmt::Continue],
                         elseif_clauses: Vec::new(),
                         else_body: None,
@@ -485,6 +488,7 @@ pub(super) fn structure_branch(
                                 then_stmts.push(HirStmt::Break);
                                 result.push(HirStmt::If {
                                     condition,
+                                    negated,
                                     then_body: then_stmts,
                                     elseif_clauses: Vec::new(),
                                     else_body: None,
@@ -506,6 +510,7 @@ pub(super) fn structure_branch(
                             structure_region(func, then_n, stop, loop_ctx, visited, pdom);
                         result.push(HirStmt::If {
                             condition,
+                            negated,
                             then_body: then_stmts,
                             elseif_clauses: Vec::new(),
                             else_body: None,
@@ -515,6 +520,7 @@ pub(super) fn structure_branch(
                         let guard_cond = negate_condition(func, condition);
                         result.push(HirStmt::If {
                             condition: guard_cond,
+                            negated: true,
                             then_body: vec![HirStmt::Break],
                             elseif_clauses: Vec::new(),
                             else_body: None,
@@ -538,6 +544,7 @@ pub(super) fn structure_branch(
                                 else_stmts.push(HirStmt::Break);
                                 result.push(HirStmt::If {
                                     condition,
+                                    negated,
                                     then_body: then_stmts,
                                     elseif_clauses: Vec::new(),
                                     else_body: Some(else_stmts),
@@ -560,6 +567,7 @@ pub(super) fn structure_branch(
                             structure_region(func, then_n, stop, loop_ctx, visited, pdom);
                         result.push(HirStmt::If {
                             condition,
+                            negated,
                             then_body: then_stmts,
                             elseif_clauses: Vec::new(),
                             else_body: if has_empty_else { Some(vec![]) } else { None },
@@ -569,6 +577,7 @@ pub(super) fn structure_branch(
                         let guard_cond = negate_condition(func, condition);
                         result.push(HirStmt::If {
                             condition: guard_cond,
+                            negated: true,
                             then_body: vec![HirStmt::Continue],
                             elseif_clauses: Vec::new(),
                             else_body: None,
@@ -621,6 +630,7 @@ pub(super) fn structure_branch(
                 if !then_stmts.is_empty() {
                     result.push(HirStmt::If {
                         condition,
+                        negated,
                         then_body: then_stmts,
                         elseif_clauses: Vec::new(),
                         else_body: None,
@@ -638,6 +648,7 @@ pub(super) fn structure_branch(
                         structure_region(func, then_n, stop, loop_ctx, visited, pdom);
                     result.push(HirStmt::If {
                         condition,
+                        negated,
                         then_body: then_stmts,
                         elseif_clauses: Vec::new(),
                         else_body: Some(else_stmts),
@@ -688,6 +699,7 @@ pub(super) fn structure_branch(
                 let has_empty_else = has_empty_else_annotation(func, then_n, effective_join);
                 result.push(HirStmt::If {
                     condition,
+                    negated,
                     then_body: then_stmts,
                     elseif_clauses: Vec::new(),
                     else_body: if has_empty_else { Some(vec![]) } else { None },
@@ -699,6 +711,7 @@ pub(super) fn structure_branch(
                     let inv_cond = negate_condition(func, condition);
                     result.push(HirStmt::If {
                         condition: inv_cond,
+                        negated: true,
                         then_body: final_else,
                         elseif_clauses: Vec::new(),
                         else_body: None,
@@ -709,6 +722,7 @@ pub(super) fn structure_branch(
                     // Emit as: if cond then <guard return> end; <body>
                     result.push(HirStmt::If {
                         condition,
+                        negated,
                         then_body: then_stmts,
                         elseif_clauses: Vec::new(),
                         else_body: None,
@@ -719,6 +733,7 @@ pub(super) fn structure_branch(
                     // Emit as `if cond then <main body> end; <guard>`
                     result.push(HirStmt::If {
                         condition,
+                        negated,
                         then_body: then_stmts,
                         elseif_clauses: Vec::new(),
                         else_body: None,
@@ -727,6 +742,7 @@ pub(super) fn structure_branch(
                 } else {
                     result.push(HirStmt::If {
                         condition,
+                        negated,
                         then_body: then_stmts,
                         elseif_clauses: Vec::new(),
                         else_body: Some(final_else),
@@ -735,6 +751,7 @@ pub(super) fn structure_branch(
             } else {
                 result.push(HirStmt::If {
                     condition,
+                    negated,
                     then_body: then_stmts,
                     elseif_clauses,
                     else_body: final_else,
@@ -747,6 +764,7 @@ pub(super) fn structure_branch(
             let then_stmts = structure_region(func, then_n, stop, loop_ctx, visited, pdom);
             result.push(HirStmt::If {
                 condition,
+                negated,
                 then_body: then_stmts,
                 elseif_clauses: Vec::new(),
                 else_body: None,
@@ -918,6 +936,7 @@ pub(super) fn extract_elseif_chain(
             let stmt = else_stmts.remove(0);
             if let HirStmt::If {
                 condition,
+                negated: _,
                 then_body,
                 elseif_clauses,
                 else_body,

@@ -55,6 +55,9 @@ pub enum HirStmt {
     /// `if cond then body [elseif cond then body]* [else body] end`
     If {
         condition: ExprId,
+        /// Branch polarity from bytecode: `true` = wrapping form (JumpIfNot),
+        /// `false` = guard form (JumpIf / negated comparison).
+        negated: bool,
         then_body: Vec<HirStmt>,
         elseif_clauses: Vec<ElseIfClause>,
         else_body: Option<Vec<HirStmt>>,

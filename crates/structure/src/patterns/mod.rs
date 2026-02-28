@@ -91,6 +91,7 @@ fn transform_stmt(func: &mut HirFunc, stmt: HirStmt) -> Vec<HirStmt> {
     match stmt {
         HirStmt::If {
             condition,
+            negated,
             then_body,
             elseif_clauses,
             else_body,
@@ -108,6 +109,7 @@ fn transform_stmt(func: &mut HirFunc, stmt: HirStmt) -> Vec<HirStmt> {
 
             let mut if_stmt = HirStmt::If {
                 condition,
+                negated,
                 then_body,
                 elseif_clauses,
                 else_body,
@@ -135,6 +137,7 @@ fn transform_stmt(func: &mut HirFunc, stmt: HirStmt) -> Vec<HirStmt> {
             // Strip trailing empty elseif clauses (artifact of structuring).
             if let HirStmt::If {
                 condition,
+                negated,
                 then_body,
                 mut elseif_clauses,
                 else_body,
@@ -145,6 +148,7 @@ fn transform_stmt(func: &mut HirFunc, stmt: HirStmt) -> Vec<HirStmt> {
                 }
                 if_stmt = HirStmt::If {
                     condition,
+                    negated,
                     then_body,
                     elseif_clauses,
                     else_body,

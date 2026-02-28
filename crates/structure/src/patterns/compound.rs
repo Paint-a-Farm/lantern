@@ -23,6 +23,7 @@ use super::conditions::negate_condition;
 pub(super) fn merge_compound_conditions(func: &mut HirFunc, stmt: HirStmt) -> HirStmt {
     let HirStmt::If {
         condition,
+        negated,
         then_body,
         elseif_clauses,
         else_body,
@@ -49,6 +50,7 @@ pub(super) fn merge_compound_conditions(func: &mut HirFunc, stmt: HirStmt) -> Hi
             func,
             HirStmt::If {
                 condition: and_cond,
+                negated: true,
                 then_body: new_then,
                 elseif_clauses: new_elseif,
                 else_body: None,
@@ -88,6 +90,7 @@ pub(super) fn merge_compound_conditions(func: &mut HirFunc, stmt: HirStmt) -> Hi
                 func,
                 HirStmt::If {
                     condition: and_cond,
+                    negated: true,
                     then_body: inner_then,
                     elseif_clauses: Vec::new(),
                     else_body: None,
@@ -99,6 +102,7 @@ pub(super) fn merge_compound_conditions(func: &mut HirFunc, stmt: HirStmt) -> Hi
 
     HirStmt::If {
         condition,
+        negated,
         then_body,
         elseif_clauses,
         else_body,

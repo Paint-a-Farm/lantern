@@ -163,6 +163,7 @@ impl<'a> LuaEmitter<'a> {
                 then_body,
                 elseif_clauses,
                 else_body,
+                ..
             } => {
                 self.write_indent();
                 self.output.push_str("if ");

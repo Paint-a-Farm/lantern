@@ -98,6 +98,7 @@ pub(super) fn try_structure_while(
         loop_body.extend(header_stmts);
         loop_body.push(HirStmt::If {
             condition: neg_cond,
+            negated: true,
             then_body: vec![HirStmt::Break],
             elseif_clauses: Vec::new(),
             else_body: None,

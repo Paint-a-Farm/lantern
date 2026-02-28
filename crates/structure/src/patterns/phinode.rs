@@ -131,6 +131,7 @@ fn build_early_return(
 ) -> (HirStmt, HirStmt) {
     let guard = HirStmt::If {
         condition: neg_condition,
+        negated: true,
         then_body: vec![HirStmt::Return(vec![default_expr])],
         elseif_clauses: Vec::new(),
         else_body: None,
@@ -146,6 +147,7 @@ fn match_if_assign(var_id: VarId, stmt: &HirStmt) -> Option<(ExprId, ExprId)> {
         then_body,
         elseif_clauses,
         else_body,
+        ..
     } = stmt
     {
         if !elseif_clauses.is_empty() || else_body.is_some() {
@@ -230,6 +232,7 @@ fn stmt_refs_var(func: &HirFunc, stmt: &HirStmt, target: VarId) -> bool {
             then_body,
             elseif_clauses,
             else_body,
+            ..
         } => {
             expr_refs_var(func, *condition, target)
                 || then_body.iter().any(|s| stmt_refs_var(func, s, target))

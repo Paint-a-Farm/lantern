@@ -42,6 +42,7 @@ pub(super) fn decompose_guard_chain(stmt: &HirStmt) -> Option<Vec<HirStmt>> {
         then_body,
         elseif_clauses,
         else_body,
+        ..
     } = stmt
     else {
         return None;
@@ -76,6 +77,7 @@ pub(super) fn decompose_guard_chain(stmt: &HirStmt) -> Option<Vec<HirStmt>> {
     // First guard from then_body
     result.push(HirStmt::If {
         condition: *condition,
+        negated: true,
         then_body: then_body.clone(),
         elseif_clauses: Vec::new(),
         else_body: None,
@@ -85,6 +87,7 @@ pub(super) fn decompose_guard_chain(stmt: &HirStmt) -> Option<Vec<HirStmt>> {
     for clause in elseif_clauses {
         result.push(HirStmt::If {
             condition: clause.condition,
+            negated: true,
             then_body: clause.body.clone(),
             elseif_clauses: Vec::new(),
             else_body: None,
@@ -119,6 +122,7 @@ pub(super) fn decompose_guard_chain(stmt: &HirStmt) -> Option<Vec<HirStmt>> {
 pub(super) fn hoist_else_guards(_func: &mut HirFunc, stmt: HirStmt) -> HirStmt {
     let HirStmt::If {
         condition,
+        negated,
         then_body,
         elseif_clauses,
         else_body,
@@ -131,6 +135,7 @@ pub(super) fn hoist_else_guards(_func: &mut HirFunc, stmt: HirStmt) -> HirStmt {
     if !elseif_clauses.is_empty() || !is_short_guard(&then_body) {
         return HirStmt::If {
             condition,
+            negated,
             then_body,
             elseif_clauses,
             else_body,
@@ -140,6 +145,7 @@ pub(super) fn hoist_else_guards(_func: &mut HirFunc, stmt: HirStmt) -> HirStmt {
     let Some(else_stmts) = else_body else {
         return HirStmt::If {
             condition,
+            negated,
             then_body,
             elseif_clauses,
             else_body: None,
@@ -156,6 +162,7 @@ pub(super) fn hoist_else_guards(_func: &mut HirFunc, stmt: HirStmt) -> HirStmt {
             then_body: ref inner_then,
             elseif_clauses: ref inner_elseif,
             else_body: ref inner_else,
+            ..
         } = *stmt
         {
             if inner_elseif.is_empty() && inner_else.is_none() && is_short_guard(inner_then) {
@@ -174,6 +181,7 @@ pub(super) fn hoist_else_guards(_func: &mut HirFunc, stmt: HirStmt) -> HirStmt {
     if new_elseif.is_empty() {
         return HirStmt::If {
             condition,
+            negated,
             then_body,
             elseif_clauses,
             else_body: Some(else_stmts),
@@ -185,6 +193,7 @@ pub(super) fn hoist_else_guards(_func: &mut HirFunc, stmt: HirStmt) -> HirStmt {
 
     HirStmt::If {
         condition,
+        negated,
         then_body,
         elseif_clauses: new_elseif,
         else_body: new_else,
@@ -206,6 +215,7 @@ pub(super) fn hoist_else_guards(_func: &mut HirFunc, stmt: HirStmt) -> HirStmt {
 pub(super) fn flip_elseif_guard(func: &mut HirFunc, stmt: HirStmt) -> HirStmt {
     let HirStmt::If {
         condition,
+        negated,
         then_body,
         mut elseif_clauses,
         else_body,
@@ -217,6 +227,7 @@ pub(super) fn flip_elseif_guard(func: &mut HirFunc, stmt: HirStmt) -> HirStmt {
     let Some(ref else_body_stmts) = else_body else {
         return HirStmt::If {
             condition,
+            negated,
             then_body,
             elseif_clauses,
             else_body,
@@ -239,6 +250,7 @@ pub(super) fn flip_elseif_guard(func: &mut HirFunc, stmt: HirStmt) -> HirStmt {
             {
                 return HirStmt::If {
                     condition,
+                    negated: true,
                     then_body,
                     elseif_clauses,
                     else_body: None,
@@ -247,6 +259,7 @@ pub(super) fn flip_elseif_guard(func: &mut HirFunc, stmt: HirStmt) -> HirStmt {
             // Guard has content (e.g. `return nil`, `error(); return`) — keep as else
             return HirStmt::If {
                 condition,
+                negated,
                 then_body,
                 elseif_clauses,
                 else_body: Some(guard_stmts),
@@ -257,6 +270,7 @@ pub(super) fn flip_elseif_guard(func: &mut HirFunc, stmt: HirStmt) -> HirStmt {
         // Already handled by the structurer; keep as-is for safety.
         return HirStmt::If {
             condition,
+            negated,
             then_body,
             elseif_clauses,
             else_body,
@@ -265,6 +279,7 @@ pub(super) fn flip_elseif_guard(func: &mut HirFunc, stmt: HirStmt) -> HirStmt {
 
     HirStmt::If {
         condition,
+        negated,
         then_body,
         elseif_clauses,
         else_body,
@@ -330,6 +345,7 @@ pub(super) fn is_early_exit_guard(stmt: &HirStmt) -> Option<(&ExprId, bool)> {
         then_body,
         elseif_clauses,
         else_body,
+        ..
     } = stmt
     {
         if elseif_clauses.is_empty() && else_body.is_none() && then_body.len() == 1 {
@@ -389,6 +405,7 @@ pub(super) fn merge_consecutive_guards(func: &mut HirFunc, stmts: Vec<HirStmt>) 
                 };
                 result.push(HirStmt::If {
                     condition: merged_cond,
+                    negated: true,
                     then_body: vec![exit_stmt],
                     elseif_clauses: Vec::new(),
                     else_body: None,
@@ -502,6 +519,7 @@ pub(super) fn absorb_tail_into_else(func: &mut HirFunc, stmts: Vec<HirStmt>) -> 
     // Replace the guard with a wrapping if-not-cond
     *result.last_mut().unwrap() = HirStmt::If {
         condition: inv_cond,
+        negated: true,
         then_body: tail,
         elseif_clauses: Vec::new(),
         else_body: None,

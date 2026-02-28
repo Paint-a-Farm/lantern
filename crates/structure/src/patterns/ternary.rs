@@ -80,6 +80,7 @@ fn try_fold_assign_then_if(
             then_body,
             elseif_clauses,
             else_body,
+            ..
         } => {
             // Must be a simple if-then (no elseif, no else)
             if !elseif_clauses.is_empty() || else_body.is_some() {
@@ -168,6 +169,7 @@ fn try_fold_if_else(func: &mut HirFunc, stmt: &HirStmt) -> Option<HirStmt> {
             then_body,
             elseif_clauses,
             else_body: Some(else_body),
+            ..
         } => {
             if !elseif_clauses.is_empty() {
                 return None;

@@ -88,6 +88,7 @@ fn collect_from_stmt(func: &HirFunc, stmt: &HirStmt, out: &mut Vec<RegAccess>) {
             then_body,
             elseif_clauses,
             else_body,
+            ..
         } => {
             collect_from_expr(func, *condition, out);
             for s in then_body {
