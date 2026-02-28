@@ -48,17 +48,22 @@ pub(super) fn try_structure_while(
     // loop header. Without this, an if-statement inside a loop body would
     // be misidentified as a nested while loop because its branches reach
     // the outer header and loop back to this node.
-    let (body_start, exit_node, loop_condition) = if has_back_edge_to(&func.cfg, then_n, node, stop)
-    {
-        // Then-branch loops back: body=then, exit=else, condition as-is
-        (then_n, else_n, condition)
-    } else if has_back_edge_to(&func.cfg, else_n, node, stop) {
-        // Else-branch loops back: body=else, exit=then, negate condition
-        let neg_cond = negate_condition(func, condition);
-        (else_n, then_n, neg_cond)
-    } else {
-        return None;
-    };
+    //
+    // Also treat the enclosing loop's exit as a barrier. Inside a for-loop
+    // body, a branch that exits the for-loop (jump to exit node → outer
+    // loop → back to this node) is a break, not a while-loop back-edge.
+    let extra_barrier = _outer_loop.and_then(|lctx| lctx.exit);
+    let (body_start, exit_node, loop_condition) =
+        if has_back_edge_to(&func.cfg, then_n, node, stop, extra_barrier) {
+            // Then-branch loops back: body=then, exit=else, condition as-is
+            (then_n, else_n, condition)
+        } else if has_back_edge_to(&func.cfg, else_n, node, stop, extra_barrier) {
+            // Else-branch loops back: body=else, exit=then, negate condition
+            let neg_cond = negate_condition(func, condition);
+            (else_n, then_n, neg_cond)
+        } else {
+            return None;
+        };
 
     // This is a while loop
     let header_stmts = std::mem::take(&mut func.cfg[node].stmts);
@@ -126,17 +131,22 @@ pub(super) fn has_back_edge_to(
     start: NodeIndex,
     header: NodeIndex,
     barrier: Option<NodeIndex>,
+    extra_barrier: Option<NodeIndex>,
 ) -> bool {
     let mut visited = FxHashSet::default();
     let mut stack = vec![start];
     while let Some(node) = stack.pop() {
-        if node == header || Some(node) == barrier || !visited.insert(node) {
+        if node == header || Some(node) == barrier || Some(node) == extra_barrier || !visited.insert(node) {
             continue;
         }
-        // Don't follow for-loop back-edges — they're not while-loop structure
+        // Don't follow for-loop back-edges — they're not while-loop structure.
+        // This includes both ForNumBack/ForGenBack LoopBack edges (iteration)
+        // and ForNumPrep/ForGenPrep LoopBack edges (entry into the loop body).
         let is_for_back = matches!(
             cfg[node].terminator,
-            Terminator::ForNumBack { .. } | Terminator::ForGenBack { .. }
+            Terminator::ForNumBack { .. }
+                | Terminator::ForGenBack { .. }
+                | Terminator::ForNumPrep { .. }
         );
         for e in cfg.edges(node) {
             if is_for_back && e.weight().kind == EdgeKind::LoopBack {
