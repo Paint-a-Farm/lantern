@@ -341,6 +341,117 @@ pub fn recover_variables(func: &mut HirFunc, scopes: &ScopeTree, num_params: u8)
         }
     }
 
+    // Phase 4c: Unify branch defs at join points (phi-node pattern).
+    //
+    // When the Luau compiler inlines a function, the inlined code writes results
+    // into registers across multiple branches, all converging at a join point.
+    // Unlike the pattern in Phase 4b, there is NO dominator def — all defs are
+    // in non-dominating branch blocks. Phase 4 can't find a dominator def for
+    // the use, and Phase 4b requires exactly 1 used def.
+    //
+    // Pattern:
+    //   block 3: R4 = expr_a  ─┐
+    //   block 6: R4 = expr_b  ─┤
+    //   block 7: R4 = expr_c  ─┼→ block 15: use R4
+    //   ...                    ─┘
+    //
+    // Fix: for uses still unresolved after Phase 4, check if multiple predecessor
+    // blocks define the register. If so, create a unified VarId and bind all
+    // the branch defs + the use to it.
+    // Collect phi-node declarations to insert into dominator blocks.
+    // Each entry is (dominator_block, VarId) — we insert `local x` there.
+    let mut phi_decls: Vec<(NodeIndex, VarId)> = Vec::new();
+
+    if let Some(ref dom_tree) = doms {
+        // Find uses that are STILL unresolved after Phase 4
+        let still_unresolved: Vec<RegRef> = unresolved_uses
+            .iter()
+            .filter(|u| !use_var.contains_key(u))
+            .copied()
+            .collect();
+
+        for use_ref in &still_unresolved {
+            let use_block = match find_node_containing_pc(func, use_ref.pc) {
+                Some(b) => b,
+                None => continue,
+            };
+
+            // Get predecessor blocks of the use's block
+            let preds: Vec<NodeIndex> = func
+                .cfg
+                .neighbors_directed(use_block, Direction::Incoming)
+                .collect();
+
+            if preds.len() < 2 {
+                continue;
+            }
+
+            // Find the last def of this register in each predecessor block
+            let mut pred_defs: Vec<RegRef> = Vec::new();
+            for pred_node in &preds {
+                let (pred_start, pred_end) = func.cfg[*pred_node].pc_range;
+                // Find the last def of this register in this predecessor
+                let last_def = accesses
+                    .iter()
+                    .filter(|a| {
+                        a.is_def
+                            && a.reg.register == use_ref.register
+                            && a.reg.pc >= pred_start
+                            && a.reg.pc < pred_end
+                    })
+                    .max_by_key(|a| a.reg.pc);
+
+                if let Some(def_access) = last_def {
+                    // Only consider defs that aren't already bound to a named variable
+                    let already_named = def_var
+                        .get(&def_access.reg)
+                        .map_or(false, |vid| func.vars.get(*vid).name.is_some());
+                    if !already_named {
+                        pred_defs.push(def_access.reg);
+                    }
+                }
+            }
+
+            // Need at least 2 predecessor defs to form a phi-node
+            if pred_defs.len() < 2 {
+                continue;
+            }
+
+            // Create a unified VarId for all branch defs
+            let info = VarInfo::new();
+            let unified_vid = func.vars.alloc(info);
+
+            // Bind all predecessor defs to the unified VarId
+            for pred_def in &pred_defs {
+                def_var.insert(*pred_def, unified_vid);
+                let info = func.vars.get_mut(unified_vid);
+                if !info.def_pcs.contains(&pred_def.pc) {
+                    info.def_pcs.push(pred_def.pc);
+                }
+            }
+
+            // Bind the use to the same unified VarId
+            use_var.insert(*use_ref, unified_vid);
+
+            // Insert `local x` declaration at the immediate dominator of the
+            // use block. This ensures the variable is in scope for all branches
+            // and the join point.
+            if let Some(idom) = dom_tree.immediate_dominator(use_block) {
+                phi_decls.push((idom, unified_vid));
+            }
+        }
+    }
+
+    // Insert phi-node LocalDecl statements into dominator blocks.
+    // These appear at the end of the block's stmts (before the terminator),
+    // which in the structured output means right before the if-tree.
+    for (block, var_id) in &phi_decls {
+        func.cfg[*block].stmts.push(HirStmt::LocalDecl {
+            var: *var_id,
+            init: None,
+        });
+    }
+
     // Phase 5: Populate reg_map for later lookup (e.g., for-loop variable resolution)
     for (reg, &var_id) in def_var.iter().chain(use_var.iter()) {
         func.vars.bind_reg(*reg, var_id);

@@ -424,6 +424,7 @@ fn count_var_uses_in_stmts(
 }
 
 /// Check if a statement assigns to (defines) a given variable.
+/// Recursively checks inside structured bodies (If, While, etc.).
 fn stmt_defines_var(stmt: &HirStmt, var_id: VarId) -> bool {
     match stmt {
         HirStmt::Assign {
@@ -435,8 +436,31 @@ fn stmt_defines_var(stmt: &HirStmt, var_id: VarId) -> bool {
             .any(|t| matches!(t, LValue::Local(v) if *v == var_id)),
         HirStmt::LocalDecl { var, .. } => *var == var_id,
         HirStmt::MultiLocalDecl { vars, .. } => vars.contains(&var_id),
+        HirStmt::If {
+            then_body,
+            elseif_clauses,
+            else_body,
+            ..
+        } => {
+            stmts_define_var(then_body, var_id)
+                || elseif_clauses
+                    .iter()
+                    .any(|c| stmts_define_var(&c.body, var_id))
+                || else_body
+                    .as_ref()
+                    .map_or(false, |b| stmts_define_var(b, var_id))
+        }
+        HirStmt::While { body, .. }
+        | HirStmt::Repeat { body, .. }
+        | HirStmt::NumericFor { body, .. }
+        | HirStmt::GenericFor { body, .. } => stmts_define_var(body, var_id),
         _ => false,
     }
+}
+
+/// Check if any statement in a slice defines the given variable.
+fn stmts_define_var(stmts: &[HirStmt], var_id: VarId) -> bool {
+    stmts.iter().any(|s| stmt_defines_var(s, var_id))
 }
 
 /// Check if a statement has observable side effects.
