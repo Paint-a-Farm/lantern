@@ -994,12 +994,15 @@ fn bind_prescope_defs_via_cfg(
 
             if let Some(access) = last_def {
                 // Verify no uses of this register between the def and the
-                // scope start (the value flows directly into the scope).
+                // end of the predecessor block (the value flows directly
+                // into the scope). Only check within the predecessor block
+                // — uses in sibling branches (same PC range but different
+                // block) must not prevent binding.
                 let has_intervening_use = accesses.iter().any(|a| {
                     !a.is_def
                         && a.reg.register == register
                         && a.reg.pc > access.reg.pc
-                        && a.reg.pc < scope_start
+                        && a.reg.pc < pred_end
                 });
                 if has_intervening_use {
                     continue;
