@@ -620,9 +620,25 @@ pub(super) fn structure_branch(
             // returns None (e.g. both branches terminate via Return —
             // there is no post-dominator, but a shared "sunk return"
             // block may still serve as the join point).
-            let join = pdom
-                .ipdom(_node)
-                .or_else(|| find_join_point(func, then_n, else_n, stop, visited));
+            let ipdom_join = pdom.ipdom(_node);
+
+            // If the IPDOM-based join is the enclosing loop's exit node,
+            // it means not all paths through this branch converge within the
+            // loop body — at least one path exits via break. The IPDOM skips
+            // over any within-body convergence points (like a shared j++
+            // block). Fall back to the reachability-based heuristic which
+            // respects the `stop` boundary and can find the actual convergence
+            // point inside the loop body.
+            let join = if let (Some(join_node), Some(lctx)) = (ipdom_join, loop_ctx) {
+                if Some(join_node) == lctx.exit {
+                    find_join_point(func, then_n, else_n, stop, visited)
+                } else {
+                    ipdom_join
+                }
+            } else {
+                ipdom_join
+            }
+            .or_else(|| find_join_point(func, then_n, else_n, stop, visited));
 
             // Fix for asymmetric returns: if join is None, check if one
             // branch always returns and the other continues.

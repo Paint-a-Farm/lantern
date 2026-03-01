@@ -44,20 +44,28 @@ pub(super) fn try_structure_while(
     // Check which branch has a back-edge to the header — that's the body.
     // The other branch is the exit.
     //
-    // We pass `stop` to prevent the DFS from traversing through the outer
-    // loop header. Without this, an if-statement inside a loop body would
-    // be misidentified as a nested while loop because its branches reach
-    // the outer header and loop back to this node.
-    //
-    // Also treat the enclosing loop's exit as a barrier. Inside a for-loop
-    // body, a branch that exits the for-loop (jump to exit node → outer
-    // loop → back to this node) is a break, not a while-loop back-edge.
-    let extra_barrier = _outer_loop.and_then(|lctx| lctx.exit);
+    // Barriers prevent false positives from transitive paths through enclosing
+    // loop structure:
+    //   - `stop`: the outer region boundary (e.g. branch join point) prevents
+    //     the DFS from traversing through outer structure back to this node.
+    //   - enclosing loop header: prevents DFS from traversing through the
+    //     enclosing loop's back-edge path. Without this, a branch inside a
+    //     loop body whose IPDOM is outside the loop would allow DFS to reach
+    //     the loop header, re-enter the loop body, and find a false back-edge.
+    //   - enclosing loop exit: prevents break paths from being mistaken for
+    //     while-loop back-edges (e.g. inside a for-loop body).
+    let mut extra_barriers: Vec<NodeIndex> = Vec::new();
+    if let Some(lctx) = _outer_loop {
+        extra_barriers.push(lctx.header);
+        if let Some(exit) = lctx.exit {
+            extra_barriers.push(exit);
+        }
+    }
     let (body_start, exit_node, loop_condition) =
-        if has_back_edge_to(&func.cfg, then_n, node, stop, extra_barrier) {
+        if has_back_edge_to(&func.cfg, then_n, node, stop, &extra_barriers) {
             // Then-branch loops back: body=then, exit=else, condition as-is
             (then_n, else_n, condition)
-        } else if has_back_edge_to(&func.cfg, else_n, node, stop, extra_barrier) {
+        } else if has_back_edge_to(&func.cfg, else_n, node, stop, &extra_barriers) {
             // Else-branch loops back: body=else, exit=then, negate condition
             let neg_cond = negate_condition(func, condition);
             (else_n, then_n, neg_cond)
@@ -118,12 +126,16 @@ pub(super) fn try_structure_while(
 }
 
 /// Check if any node reachable from `start` has a direct edge to `header`,
-/// without passing through `barrier` (the outer loop header, if any).
+/// without passing through `barrier` or any of the `extra_barriers`.
 ///
-/// The barrier prevents false positives: an if-statement inside a while-loop
-/// body has branches that eventually reach the outer loop header, which loops
-/// back to the if-statement's node. Without the barrier, this transitive path
-/// would make the if-statement look like a nested while loop.
+/// Barriers prevent false positives:
+///   - `barrier` (the `stop` node) prevents the DFS from escaping the current
+///     region boundary.
+///   - `extra_barriers` include the enclosing loop's header and exit. The
+///     header barrier prevents DFS from re-entering the loop body through
+///     the back-edge path, which would create false nested loop detections.
+///     The exit barrier prevents break paths from being mistaken for
+///     while-loop back-edges.
 ///
 /// Also skips LoopBack edges from ForNumBack/ForGenBack terminators — those
 /// belong to for-loops and should not trigger while-loop detection.
@@ -132,12 +144,16 @@ pub(super) fn has_back_edge_to(
     start: NodeIndex,
     header: NodeIndex,
     barrier: Option<NodeIndex>,
-    extra_barrier: Option<NodeIndex>,
+    extra_barriers: &[NodeIndex],
 ) -> bool {
     let mut visited = FxHashSet::default();
     let mut stack = vec![start];
     while let Some(node) = stack.pop() {
-        if node == header || Some(node) == barrier || Some(node) == extra_barrier || !visited.insert(node) {
+        if node == header
+            || Some(node) == barrier
+            || extra_barriers.contains(&node)
+            || !visited.insert(node)
+        {
             continue;
         }
         // Don't follow for-loop back-edges — they're not while-loop structure.
