@@ -166,18 +166,70 @@ fn find_region_start(
         let insn = &instructions[scan_pc];
 
         if let Some(target) = conditional_jump_target(insn, scan_pc) {
-            if target == true_pc || target == end_pc || target == false_pc {
+            if target == true_pc || target == false_pc {
+                // Jumps to true_pc or false_pc are always part of the boolean
+                // expression — they select which LOADB epilogue to execute.
                 earliest = scan_pc;
 
-                // Check if there's a LOADB pre-init before this comparison.
                 if let Some(loadb_pc) = find_preceding_loadb(instructions, scan_pc, result_reg) {
                     earliest = loadb_pc;
+                }
+            } else if target == end_pc {
+                // Jumps to end_pc are short-circuit exits that skip the entire
+                // boolean epilogue. They are part of the boolean chain in two
+                // cases:
+                //
+                // 1. Comparison chains (`a == X or a == Y`): the compiler emits
+                //    `LOADB Rx, true/false` before each comparison as the
+                //    short-circuit value. We detect this via find_preceding_loadb.
+                //
+                // 2. Truthiness chains (`x and comparison`): `JumpIf`/`JumpIfNot`
+                //    tests the result register directly (A == result_reg).
+                //    The pre-init is a `Move`, not `LoadB`.
+                //
+                // Without either signal, the jump is a guard (e.g. `if x ~= nil
+                // then`) that should remain a CFG branch, not be absorbed.
+                if let Some(loadb_pc) = find_preceding_loadb(instructions, scan_pc, result_reg) {
+                    earliest = loadb_pc;
+                } else if matches!(insn.op, OpCode::JumpIf | OpCode::JumpIfNot)
+                    && insn.a == result_reg
+                {
+                    // Truthiness jump on the result register — this is a chain
+                    // member like `x and comparison`. Look for a preceding
+                    // write (Move/LoadB) to include the pre-init.
+                    earliest = scan_pc;
+                    if let Some(write_pc) =
+                        find_preceding_write(instructions, scan_pc, result_reg)
+                    {
+                        earliest = write_pc;
+                    }
                 }
             }
         }
     }
 
     earliest
+}
+
+/// Look backwards from `before_pc` for any write to `reg` (Move, LoadB, etc.)
+/// that is likely the pre-initialization of a truthiness chain member.
+///
+/// Returns the PC of the write if found within a short window.
+fn find_preceding_write(instructions: &[Instruction], before_pc: usize, reg: u8) -> Option<usize> {
+    use super::utils::{is_chain_barrier, writes_register};
+
+    let window = 6.min(before_pc);
+    for delta in 1..=window {
+        let scan = before_pc - delta;
+        let insn = &instructions[scan];
+        if writes_register(insn, reg) {
+            return Some(scan);
+        }
+        if is_chain_barrier(insn) {
+            break;
+        }
+    }
+    None
 }
 
 /// Look backwards from `before_pc` for a LOADB of `reg` that is likely
